@@ -1,0 +1,6 @@
+GrandOrgue: https://github.com/GrandOrgue/LoopAuditioneer
+milselarch: https://github.com/milselarch/autolooper
+Particular Programs Ltd: https://breakfastquay.com/rubberband/
+SignalSmith: https://signalsmith-audio.co.uk/code/stretch/
+peastman (Granular method of looping): https://vi-control.net/community/threads/extending-very-short-samples.153986/ 
+Kelly Fitz and Lippold Haken (Loris): https://github.com/kellyfitz/loris

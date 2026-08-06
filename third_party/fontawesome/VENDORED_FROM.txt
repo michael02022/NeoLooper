@@ -1,0 +1,18 @@
+Font Awesome 4.7 (fontawesome-webfont.ttf) copiado del paquete Debian
+fonts-font-awesome (/usr/share/fonts/truetype/font-awesome/), fuentes bajo
+licencia SIL OFL 1.1 (ver /usr/share/doc/fonts-font-awesome/copyright).
+Upstream: https://github.com/FortAwesome/Font-Awesome (rama 4.x).
+
+IconsFontAwesome4.h (header de mapeo nombre->codepoint UTF-8, generado por
+el script oficial de https://github.com/juliettef/IconFontCppHeaders,
+licencia zlib) copiado de una integracion ImGui existente en otro
+repositorio del usuario (Shipwright/libultraship), que a su vez lo trae
+igual de la fuente anterior -- mismo criterio que ImGui (ver
+third_party/imgui/VENDORED_FROM.txt): copia fisica, sin submodulo git.
+
+Se eligio FA4 (en vez de FA6) porque el par font+header ya estaba disponible
+localmente y verificado consistente entre si (mismos codepoints), sin
+depender de red para el fetch. FA4 cubre de sobra los iconos de transporte
+usados hoy (play/stop/pause/circle/repeat); si en el futuro se necesitan
+iconos que solo existan en FA5/6, se puede migrar el par completo (archivo +
+header) sin tocar el mecanismo de merge en ImGui.

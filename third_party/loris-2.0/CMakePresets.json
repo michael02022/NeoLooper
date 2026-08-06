@@ -1,0 +1,158 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "default",
+            "displayName": "Debug (venv Python)",
+            "description": "Debug build; Python/SWIG from the project .venv, FFTW from Homebrew",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            },
+            "environment": {
+                "VIRTUAL_ENV": "${sourceDir}/.venv",
+                "PATH": "${sourceDir}/.venv/bin:/opt/homebrew/bin:$penv{PATH}"
+            }
+        },
+        {
+            "name": "release",
+            "displayName": "Release (venv Python)",
+            "inherits": "default",
+            "binaryDir": "${sourceDir}/build-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "nofftw",
+            "displayName": "Debug, bundled FFT (no FFTW)",
+            "inherits": "default",
+            "binaryDir": "${sourceDir}/build-nofftw",
+            "cacheVariables": {
+                "LORIS_FFTW": "OFF"
+            }
+        },
+        {
+            "name": "ci",
+            "displayName": "CI Debug (system Python/SWIG)",
+            "description": "Debug build for continuous integration: no .venv or Homebrew paths are injected, so Python, SWIG and FFTW are taken from the platform",
+            "binaryDir": "${sourceDir}/build-ci",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "ci-release",
+            "displayName": "CI Release (system Python/SWIG)",
+            "inherits": "ci",
+            "binaryDir": "${sourceDir}/build-ci-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "ci-nofftw",
+            "displayName": "CI Debug, bundled FFT (no FFTW)",
+            "inherits": "ci",
+            "binaryDir": "${sourceDir}/build-ci-nofftw",
+            "cacheVariables": {
+                "LORIS_FFTW": "OFF"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "default",
+            "configurePreset": "default",
+            "jobs": 8
+        },
+        {
+            "name": "release",
+            "configurePreset": "release",
+            "jobs": 8
+        },
+        {
+            "name": "nofftw",
+            "configurePreset": "nofftw",
+            "jobs": 8
+        },
+        {
+            "name": "ci",
+            "configurePreset": "ci",
+            "jobs": 4
+        },
+        {
+            "name": "ci-release",
+            "configurePreset": "ci-release",
+            "jobs": 4
+        },
+        {
+            "name": "ci-nofftw",
+            "configurePreset": "ci-nofftw",
+            "jobs": 4
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "default",
+            "configurePreset": "default",
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "jobs": 8
+            }
+        },
+        {
+            "name": "release",
+            "configurePreset": "release",
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "jobs": 8
+            }
+        },
+        {
+            "name": "nofftw",
+            "configurePreset": "nofftw",
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "jobs": 8
+            }
+        },
+        {
+            "name": "ci",
+            "configurePreset": "ci",
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "jobs": 4
+            }
+        },
+        {
+            "name": "ci-release",
+            "configurePreset": "ci-release",
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "jobs": 4
+            }
+        },
+        {
+            "name": "ci-nofftw",
+            "configurePreset": "ci-nofftw",
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "jobs": 4
+            }
+        }
+    ]
+}

@@ -1,0 +1,1 @@
+ImGui 1.92.8 copiado de neural-amp-modeler-lv2/deps/imgui (con parche GImGui thread-local en imconfig.h)

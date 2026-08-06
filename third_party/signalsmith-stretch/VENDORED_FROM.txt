@@ -1,0 +1,17 @@
+Signalsmith Stretch (signalsmith-stretch.h), header-only C++ time/pitch
+stretcher by Geraint Luff / Signalsmith Audio Ltd, MIT license.
+Upstream: https://github.com/Signalsmith-Audio/signalsmith-stretch (main
+branch, no version tag at time of vendoring).
+
+Depends on the "signalsmith-linear" library (also header-only, MIT,
+Signalsmith Audio) for its STFT/FFT: only the two headers actually needed
+(fft.h, stft.h) are copied into signalsmith-linear/, matching the include
+path signalsmith-stretch.h expects (`#include
+"signalsmith-linear/stft.h"`), instead of the full linear.h/approx.h/
+platform-specific-backend files the upstream repo also ships (SIMD
+backends for other targets, tests, etc. -- not needed here).
+Upstream: https://github.com/Signalsmith-Audio/linear (main branch).
+
+Copied as physical files, no submodule -- same criterion as ImGui/CLAP/
+Loris (see their own VENDORED_FROM.txt / CMakeLists.txt comments in
+third_party/).

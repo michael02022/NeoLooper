@@ -1,0 +1,62 @@
+Necesito un editor de audio especializado en loopear samples INSPIRADO en el diseño de Edison de Image Line. Debe ser un plugin CLAP y de UI ImGui, SIN JUCE. Enfocado a ser totalmente fluido y responsivo. Crossplatform (Windows, Linux, Mac), de momento solo quiero enfocarme en Linux.
+
+El plugin es de FX. Debe tener la capacidad de poder grabar el sonido que entra donde es cargado el plugin.
+
+La UI debe tener:
+
+* Boton de activar bucle
+* Boton de Reproducir
+* Boton de Pausa
+* Boton de Grabar
+
+Se puede cargar audios (tanto con un drag n drop como un File -> Open), los formatos de entrada son WAV, AIFF, FLAC, OGG, todo audio que va abrirse va almacenarse bajo PCM en RAM. El procesamiento del audio debe ser exclusivamente PCM 16 y 32 bits en el editor (como Edison). Si al editar el audio llega a tener un aumento de amplitud no soportado por 16 bits, automaticamente lo convierte a 32 bits para que no haya clipping/distorsion. Hay boton asignado para esto, la cual es un toggle que cambia de 16 a 32 y viceversa, y muestra los bits en uso del sample.
+
+El editor de audio debe tener la capacidad de cambiar el sample rate, tanto sin hacer resample (solo cambia el numero del samplerate) y con resample (basate en el algoritmo de Audacity de hacer resample en modo High Quality). Hay boton asignado para esto.
+
+Tambien debe tener la capacidad de cambiar de Stereo a Mono (Hay 3 opciones, tomar de lado L, lado R o mezclar las dos entradas para formar el Mono).
+
+Debe tener un boton asignado para la normalizacion del audio.
+
+El audio abierto y procesado se guarda en RAM, nada de memoria en disco para tener toda la eficiencia posible.
+
+Hay un cuadro donde es el enfoque principal, donde se ilustra la onda de audio, es un cuadro donde se puede ampliar o reducir con el scroll (similar al visualizador de Polyphone). Se puede hacer seleccion en el con click en cualquier zona del audio.
+
+La zona seleccionada puede tener estas opciones:
+* Cortar audio (se almacena/guarda en memoria) con Ctrl+X
+* Copiar audio (se almacena/guarda en memoria) con Ctrl+C
+* Borrar audio (Supr)
+* Asignar loop start y loop end
+
+Cada de estas opciones tiene su boton dedicado en el UI.
+
+Si hay informacion de un pedazo de audio guardado al cortar/copiar, si hay selección activa, el inicio de la seleccion es el punto de partida para pegar el audio. Si no hay selección, se pega al final del audio.
+
+La seleccion se basa en la selección de samples (muestras), en una esquina debe mostrar el cantidad de samples totales que hay en el audio, al seleccionarse debe mostrar el rango de samples seleccionado. Y al lado esta la informacion equivalente pero en mm:ss.ms
+
+El editor de audio posee la capacidad de poder usar envelopes de amplitud, pan y  separación estereo (como en Edison) y el usuario puede poner puntos en como estos son modificados (click derecho crea nuevo punto del envelope, la interpolacion de cada punto es lineal), este envelope es extremadamente preciso y hay un boton de "apply" que imprega esa precisión al sample (aplica los cambios) y los envelopes se reincian luego de eso.
+
+Debajo de todo esto en el UI, hay un piano representando las notas MIDI (128), una nota de este representa la root note del sample con un color y este se puede asignar con click derecho. Si se hace click normal, el audio es reproducido relativo a la root note (como un sampler). Tambien la UI tiene un slider encima del piano que seria el finetune/tune de -99 a 99. Al dar play el audio es afectado por este finetune/tune (o sea que al dar play el audio toma en cuenta la afinación asignada) todo esto se puede modificar en tiempo real (mientras se reproduce en bucle, los cambios en los loop start-loop end, pedazo de audio seleccionado y el finetuning se pueden escuchar inmediatamente)
+
+Por ultimo, hay un cuadro pequeño que es un oscilloscopio donde relativo a la rootnote (bajo una afinacion concreta, siendo 440Hz), muestra visualmente la afinación del sample (si la onda del oscilloscopio se ve quieto, me da a entender como usuario que el sample ha sido afinado, si se ve un desplazamiento, es porque no está afinado, ese es el proposito del oscilloscopio), puedes tomar de referencia corroscope.
+
+Hay que recordar que, si hay un start loop y end loop definido, este puede modificarse la distancia entre los dos al mantener click en uno de los marcadores y arrastrarlo con el mouse. Tambien hay que especificar que el end loop JAMAS tendrá un valor inferior a start loop (o sea si el usuario arrastra demás hasta llegar el start loop, este se detiene bajo un sample de diferencia) tal como Edison.
+
+Cuando hay un start loop y end loop asignado o una porcion de audio seleccionada (el inicio y final de la seleccion se le interpretaria como un start loop/end loop), se desbloquea las opciones de looping.
+
+Estas opciones de looping son MODULOS, o sea, cada archivo de codigo es un tipo de loopeo. Cada modulo tiene la capacidad de tomar el audio que está siendo editado en PCM en crudo (o sea, no toma solo la parte seleccionada, toma todo el audio y registra desde que sample hasta que sample está siendo seleccionado/marcado en loop) y modificarlo como le da la gana bajo metodos conocidos y demas, y las modificaciones se aplican de forma TEMPORAL en tiempo real (el usuario puede escuchar los cambios todo el tiempo). A continuación describiré los diferentes tipos de loop que de momento pueden estar disponibles. Los modulos de los metodos de loop se abren en una ventana nueva.
+
+* Classic Crossfade: Este metodo extrae la zona donde esta el start loop y end loop. Esta zona se va reproduciendo en bucle para que la modificacion ocurra en vivo. Este audio que está siendo editado es ajeno al audio cargado en el editor. Solo se aplicarán los cambios si el usuario acepta la configuración asignada.
+
+Hay un slider llamado crossfade que se encarga de un porcentaje (0 - 100%) con una precisión decimal (la idea es que el usuario tenga la precision para identificar el crossfade perfecto en el sample), cuando se aumenta el porcentaje, ese porcentaje representa una porcion extraida de la porcion del bucle y hace un crossfade al final del loop (Ilustración).
+
+Luego hay un slider donde se determina que tanto es la intensidad de equal a power en la ganancia del crossfade.
+
+Con estos dos simples sliders son suficientes para definir el Classic Crossfade.
+
+* Ping Pong Crossfade: Las mismas opciones que Classic Crossfade, pero esta vez la porcion del loop es invertido (reverse) y se concatenan con la porcion del loop original. Hay dos sliders de crossfade, uno se encarga del crossfade entre el audio normal y el audio invertido, y el otro slider se encarga del crossfade tradicional (toma un porcentaje de la porcion inicial y aplica un crossfade al final del audio que en este caso es la parte del audio invertida) Ambos sliders tienen su propio slider donde se determina que tanto es la intensidad de equal a power en la ganancia del crossfade. (Ilustración)
+
+Cuando el usuario ya tenga un loop perfecto acorde a su criterio, le da al boton de "aplicar" y se aplica al audio los cambios de forma oficial.
+
+Cuando el usuario ya haya hecho las modificaciones correspondientes, el audio resultante se puede exportar a WAV, aplicando los valores en el chunk de SMPL (start loop, end loop, root note [MIDI unity note], finetune [MIDI pitch fraction]) con el tipico cuadro de file browser y darle nombre al archivo.
+
+El plugin debe soportar deshacer (Ctrl+Z) y rehacer

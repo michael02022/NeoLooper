@@ -1,0 +1,11 @@
+The Loris C++ sources are documented using Doxygen, if available.
+
+"cmake --build build --target docs" builds an HTML version of the C++
+documentation into build/doc/html.
+
+The command line utilities are documented in utils.html.
+
+Documentation for the Python module is available using pydoc.
+
+The procedural (C) interface is documented only in the
+header file loris.h.
