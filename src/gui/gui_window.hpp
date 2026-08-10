@@ -23,7 +23,8 @@ public:
     void destroy();
 
     // Callable from the host's main thread (queued to the GUI thread):
-    void setParent(unsigned long x11Window);
+    // nativeParent: X11 Window on Linux, HWND on Windows.
+    void setParent(intptr_t nativeParent);
     void setVisible(bool visible);
     void setSize(uint32_t w, uint32_t h);
 
@@ -45,7 +46,7 @@ private:
 
     // command mailbox, host -> GUI thread
     std::mutex cmdMutex_;
-    unsigned long pendingParent_ = 0;
+    intptr_t pendingParent_ = 0;
     int pendingVisible_ = -1; // -1 nothing, 0 hide, 1 show
     uint32_t pendingW_ = 0, pendingH_ = 0;
     bool hasPendingSize_ = false;

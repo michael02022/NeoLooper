@@ -7,19 +7,54 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
+if(MSVC)
+  # M_PI et al. aren't defined by <cmath>/<math.h> under MSVC otherwise --
+  # used throughout src/ and test/ (Linux's libc defines them unconditionally).
+  add_compile_definitions(_USE_MATH_DEFINES)
+endif()
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
-# Rubber Band Library (breakfastquay.com/rubberband, GPLv2+ -- same
-# licensing situation this project already has with the vendored Loris,
-# see third_party/loris-2.0/COPYING): linked as a system library, same
-# criterion as sndfile/X11/OpenGL below, rather than vendored, since it's
-# packaged by every major distro (Debian/Ubuntu: librubberband-dev) and
-# isn't the kind of niche/hard-to-package dependency Loris/ImGui/CLAP are.
-pkg_check_modules(RUBBERBAND REQUIRED IMPORTED_TARGET rubberband)
-find_package(X11 REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(Threads REQUIRED)
+
+# Rubber Band Library (breakfastquay.com/rubberband, GPLv2+ -- same
+# licensing situation this project already has with the vendored Loris, see
+# third_party/loris-2.0/COPYING): linked as a system library rather than
+# vendored, since it's packaged by every major distro (Debian/Ubuntu:
+# librubberband-dev) and by vcpkg on Windows, and isn't the kind of niche/
+# hard-to-package dependency Loris/ImGui/CLAP are.
+if(WIN32)
+  # vcpkg triplet: sndfile ships a CMake config (SndFile::sndfile). rubberband's
+  # doesn't reliably across vcpkg versions, so fall back to a manual
+  # find_library/find_path IMPORTED target when no config package is found.
+  find_package(SndFile CONFIG REQUIRED)
+  find_package(rubberband CONFIG QUIET)
+  if(NOT TARGET RubberBand::rubberband)
+    find_path(RUBBERBAND_INCLUDE_DIR NAMES rubberband/RubberBandStretcher.h)
+    find_library(RUBBERBAND_LIBRARY NAMES rubberband)
+    if(NOT RUBBERBAND_INCLUDE_DIR OR NOT RUBBERBAND_LIBRARY)
+      message(FATAL_ERROR "Rubber Band not found -- vcpkg install rubberband")
+    endif()
+    add_library(RubberBand::rubberband UNKNOWN IMPORTED)
+    set_target_properties(RubberBand::rubberband PROPERTIES
+      IMPORTED_LOCATION "${RUBBERBAND_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${RUBBERBAND_INCLUDE_DIR}")
+  endif()
+else()
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
+  pkg_check_modules(RUBBERBAND REQUIRED IMPORTED_TARGET rubberband)
+  find_package(X11 REQUIRED)
+endif()
+
+if(WIN32)
+  set(SNDFILE_TARGET SndFile::sndfile)
+  set(RUBBERBAND_TARGET RubberBand::rubberband)
+  set(M_LIB "")
+else()
+  set(SNDFILE_TARGET PkgConfig::SNDFILE)
+  set(RUBBERBAND_TARGET PkgConfig::RUBBERBAND)
+  set(M_LIB m)
+endif()
 
 # Signalsmith Stretch (signalsmith-audio.co.uk/code/stretch), header-only,
 # MIT: vendored under third_party/signalsmith-stretch (see its
@@ -28,19 +63,22 @@ find_package(Threads REQUIRED)
 set(SIGNALSMITH_STRETCH_DIR ${CMAKE_SOURCE_DIR}/third_party/signalsmith-stretch)
 
 # Icon font (Font Awesome 4, ver third_party/fontawesome/VENDORED_FROM.txt)
-# embebido en el binario via xxd -i: el .clap sigue siendo un unico archivo
+# embebido en el binario: el .clap sigue siendo un unico archivo
 # autocontenido, sin depender de una fuente instalada en el sistema del
-# usuario ni de distribuir un .ttf suelto junto al plugin.
-find_program(XXD_EXECUTABLE xxd REQUIRED)
+# usuario ni de distribuir un .ttf suelto junto al plugin. bin2c
+# (tools/bin2c.cpp) reemplaza a `xxd -i` -- no esta disponible en Windows,
+# y esto evita la dependencia de una herramienta externa tambien en Linux.
+add_executable(bin2c tools/bin2c.cpp)
+
 set(FONTAWESOME_DIR ${CMAKE_SOURCE_DIR}/third_party/fontawesome)
 set(FONTAWESOME_DATA_CPP ${CMAKE_BINARY_DIR}/generated/fontawesome_data.cpp)
 add_custom_command(
   OUTPUT ${FONTAWESOME_DATA_CPP}
   COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/generated
-  COMMAND ${XXD_EXECUTABLE} -i fontawesome-webfont.ttf ${FONTAWESOME_DATA_CPP}
-  WORKING_DIRECTORY ${FONTAWESOME_DIR}
-  DEPENDS ${FONTAWESOME_DIR}/fontawesome-webfont.ttf
-  COMMENT "Embebiendo fontawesome-webfont.ttf (xxd -i)"
+  COMMAND $<TARGET_FILE:bin2c> ${FONTAWESOME_DIR}/fontawesome-webfont.ttf
+          ${FONTAWESOME_DATA_CPP} fontawesome_webfont_ttf
+  DEPENDS bin2c ${FONTAWESOME_DIR}/fontawesome-webfont.ttf
+  COMMENT "Embebiendo fontawesome-webfont.ttf (bin2c)"
   VERBATIM
 )
 
@@ -93,8 +131,32 @@ set(LORIS_SRC
 )
 # Loris's own headers trip -Wcomment (doxygen "//!" blocks containing "/*"-
 # looking text); silence it only for these vendored files, same flag Loris's
-# own CMakeLists.txt uses for its `loris` target.
-set_source_files_properties(${LORIS_SRC} PROPERTIES COMPILE_OPTIONS -Wno-comment)
+# own CMakeLists.txt uses for its `loris` target. MSVC doesn't have this
+# warning (nor the -W flag syntax), so the option only applies on GCC/Clang.
+set_source_files_properties(${LORIS_SRC} PROPERTIES COMPILE_OPTIONS
+  "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wno-comment>")
+
+# GUI windowing/event backend: X11+GLX on Linux, Win32+WGL on Windows -- the
+# only platform-specific pair of implementations in the codebase, sharing a
+# single public API (src/gui/gui_window.hpp). See src/gui/gui_window_x11.cpp
+# and src/gui/gui_window_win32.cpp for the split rationale.
+if(WIN32)
+  set(GUI_WINDOW_SRC
+    src/gui/gui_window_win32.cpp
+    third_party/imgui/backends/imgui_impl_win32.cpp
+  )
+  # A loaded-as-a-plugin DLL can't influence the DLL search path the host
+  # process uses for its own imports (that search is anchored to the HOST's
+  # directory, not the plugin's) -- so vcpkg's sndfile.dll/rubberband-3.dll
+  # sitting next to NeoLooper.clap wouldn't be found when e.g. REAPER loads
+  # it, even though they resolve fine from a same-folder test harness.
+  # Delay-loading them and resolving the path ourselves (src/win_delayload.cpp)
+  # sidesteps host-controlled search order entirely.
+  set(WIN_DELAYLOAD_SRC src/win_delayload.cpp)
+else()
+  set(GUI_WINDOW_SRC src/gui/gui_window_x11.cpp)
+  set(WIN_DELAYLOAD_SRC)
+endif()
 
 add_library(neolooper MODULE
   src/plugin.cpp
@@ -103,7 +165,8 @@ add_library(neolooper MODULE
   src/resampler.cpp
   src/wav_io.cpp
   src/foreign_metadata.cpp
-  src/gui/gui_window.cpp
+  ${GUI_WINDOW_SRC}
+  ${WIN_DELAYLOAD_SRC}
   src/gui/editor_ui.cpp
   src/gui/waveform_view.cpp
   src/gui/file_dialog.cpp
@@ -170,12 +233,31 @@ target_include_directories(neolooper PRIVATE
 )
 
 target_link_libraries(neolooper PRIVATE
-  PkgConfig::SNDFILE
-  PkgConfig::RUBBERBAND
-  X11::X11
+  ${SNDFILE_TARGET}
+  ${RUBBERBAND_TARGET}
   OpenGL::GL
   Threads::Threads
 )
+if(WIN32)
+  # gdi32: WGL pixel format + context; shell32: WM_DROPFILES (DragAcceptFiles/
+  # DragQueryFile); user32: window/message-loop APIs; delayimp: runtime
+  # support for the /DELAYLOAD imports resolved in src/win_delayload.cpp.
+  target_link_libraries(neolooper PRIVATE gdi32 shell32 user32 delayimp)
+  target_link_options(neolooper PRIVATE /DELAYLOAD:sndfile.dll /DELAYLOAD:rubberband-3.dll)
+  # "sndfile.dll" is a common name other audio software might also bundle;
+  # ship our copy under a plugin-unique name so a host process that loads
+  # many plugins together (a DAW) can never resolve someone else's
+  # same-named DLL to ours or vice versa. src/win_delayload.cpp redirects
+  # the linker's expected "sndfile.dll" name to this file at load time.
+  add_custom_command(TARGET neolooper POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:SndFile::sndfile>"
+            "$<TARGET_FILE_DIR:neolooper>/neolooper_sndfile.dll"
+    COMMENT "Copiando sndfile.dll con nombre unico (neolooper_sndfile.dll)"
+  )
+else()
+  target_link_libraries(neolooper PRIVATE X11::X11)
+endif()
 
 set_target_properties(neolooper PROPERTIES
   PREFIX ""
@@ -186,7 +268,9 @@ set_target_properties(neolooper PROPERTIES
 # Host de prueba minimo: carga el .clap, lo instancia y procesa audio sin GUI.
 add_executable(mini_host test/mini_host.c)
 target_include_directories(mini_host PRIVATE third_party/clap/include)
-target_link_libraries(mini_host PRIVATE ${CMAKE_DL_LIBS} m)
+if(NOT WIN32)
+  target_link_libraries(mini_host PRIVATE ${CMAKE_DL_LIBS} m)
+endif()
 
 # Test del nucleo offline (Document, Engine RT, resampler, WAV+smpl).
 add_executable(core_test
@@ -217,5 +301,5 @@ add_executable(core_test
   src/procmods/loris_dsp.cpp
   ${LORIS_SRC}
 )
-target_include_directories(core_test PRIVATE src ${LORIS_DIR} ${SIGNALSMITH_STRETCH_DIR})
-target_link_libraries(core_test PRIVATE PkgConfig::SNDFILE PkgConfig::RUBBERBAND Threads::Threads m)
+target_include_directories(core_test PRIVATE src third_party ${LORIS_DIR} ${SIGNALSMITH_STRETCH_DIR})
+target_link_libraries(core_test PRIVATE ${SNDFILE_TARGET} ${RUBBERBAND_TARGET} Threads::Threads ${M_LIB})

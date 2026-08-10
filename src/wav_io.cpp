@@ -2,6 +2,10 @@
 
 #include <sndfile.h>
 
+#define DR_MP3_IMPLEMENTATION
+#include "dr_libs/dr_mp3.h"
+
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -9,7 +13,63 @@
 
 #include "foreign_metadata.hpp"
 
+namespace {
+
+// case-insensitive suffix match (POSIX strcasecmp/Windows _stricmp both
+// need an #ifdef; this doesn't -- ext is always lowercase ASCII, e.g. ".mp3")
+bool hasExtension(const std::string& path, const char* ext) {
+    size_t n = strlen(ext);
+    if (path.size() < n) return false;
+    for (size_t i = 0; i < n; ++i)
+        if (std::tolower((unsigned char)path[path.size() - n + i]) != ext[i])
+            return false;
+    return true;
+}
+
+// MP3 isn't handled by libsndfile (no MPEG support, see CMakeLists.txt/
+// third_party/dr_libs/VENDORED_FROM.txt for why); dr_mp3 decodes it
+// instead. No loop/root-note metadata to extract -- MP3 doesn't carry the
+// kind of instrument chunks WAV/AIFF do, so unlike the libsndfile path
+// there's nothing for foreign_metadata.hpp to supplement either.
+LoadResult loadMp3(const std::string& path) {
+    LoadResult r;
+    drmp3 mp3;
+    if (!drmp3_init_file(&mp3, path.c_str(), nullptr)) {
+        r.error = "Could not open MP3 file";
+        return r;
+    }
+    drmp3_uint64 total = drmp3_get_pcm_frame_count(&mp3);
+    if (mp3.channels < 1 || total == 0) {
+        r.error = "File has no audio";
+        drmp3_uninit(&mp3);
+        return r;
+    }
+
+    auto d = std::make_shared<AudioData>();
+    d->sampleRate = (double)mp3.sampleRate;
+    d->format = SampleFormat::Float32; // lossy source, same as OGG (see below)
+
+    int nch = mp3.channels > 2 ? 2 : (int)mp3.channels;
+    std::vector<float> inter((size_t)total * mp3.channels);
+    drmp3_uint64 got = drmp3_read_pcm_frames_f32(&mp3, total, inter.data());
+    drmp3_uninit(&mp3);
+
+    d->ch.resize(nch);
+    for (int c = 0; c < nch; ++c) d->ch[c].resize((size_t)got);
+    for (drmp3_uint64 i = 0; i < got; ++i)
+        for (int c = 0; c < nch; ++c)
+            d->ch[c][(size_t)i] = inter[(size_t)i * mp3.channels + c];
+
+    d->buildPeaks();
+    r.data = std::move(d);
+    return r;
+}
+
+} // namespace
+
 LoadResult loadAudioFile(const std::string& path) {
+    if (hasExtension(path, ".mp3")) return loadMp3(path);
+
     LoadResult r;
     SF_INFO info{};
     SNDFILE* f = sf_open(path.c_str(), SFM_READ, &info);

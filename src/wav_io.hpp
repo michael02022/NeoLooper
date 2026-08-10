@@ -6,7 +6,8 @@
 
 #include "audio_data.hpp"
 
-// Result of loading a file (WAV/AIFF/FLAC/OGG via libsndfile).
+// Result of loading a file (WAV/AIFF/FLAC/OGG via libsndfile, MP3 via
+// dr_mp3 -- see loadAudioFile's dispatch in wav_io.cpp).
 struct LoadResult {
     std::shared_ptr<AudioData> data; // null on failure
     std::string error;

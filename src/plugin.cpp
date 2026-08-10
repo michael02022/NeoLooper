@@ -51,7 +51,8 @@ const clap_plugin_descriptor_t kDesc = {
     .support_url = "",
     .version = "0.1.0",
     .description = "Audio editor for looping samples, Edison-inspired. "
-                   "Record, edit, mark loops with crossfades, and export WAV+smpl.",
+                   "Record, edit, mark loops with crossfades, import "
+                   "WAV/AIFF/FLAC/OGG/MP3, and export WAV+smpl.",
     .features = kFeatures,
 };
 
@@ -187,12 +188,20 @@ const clap_plugin_state_t kExtState = {
 // -------------------------------------------------------------------- gui
 
 bool guiIsApiSupported(const clap_plugin_t*, const char* api, bool is_floating) {
+#ifdef _WIN32
+    return !is_floating && strcmp(api, CLAP_WINDOW_API_WIN32) == 0;
+#else
     return !is_floating && strcmp(api, CLAP_WINDOW_API_X11) == 0;
+#endif
 }
 
 bool guiGetPreferredApi(const clap_plugin_t*, const char** api,
                         bool* is_floating) {
+#ifdef _WIN32
+    *api = CLAP_WINDOW_API_WIN32;
+#else
     *api = CLAP_WINDOW_API_X11;
+#endif
     *is_floating = false;
     return true;
 }
@@ -254,7 +263,11 @@ bool guiSetSize(const clap_plugin_t* plugin, uint32_t w, uint32_t h) {
 bool guiSetParent(const clap_plugin_t* plugin, const clap_window_t* win) {
     Plugin* p = self(plugin);
     if (!p->window || !win) return false;
-    p->window->setParent((unsigned long)win->x11);
+#ifdef _WIN32
+    p->window->setParent((intptr_t)win->win32);
+#else
+    p->window->setParent((intptr_t)win->x11);
+#endif
     return true;
 }
 

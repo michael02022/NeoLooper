@@ -157,9 +157,9 @@ void GuiWindow::destroy() {
     running_.store(false);
 }
 
-void GuiWindow::setParent(unsigned long x11Window) {
+void GuiWindow::setParent(intptr_t nativeParent) {
     std::lock_guard<std::mutex> l(cmdMutex_);
-    pendingParent_ = x11Window;
+    pendingParent_ = nativeParent;
 }
 
 void GuiWindow::setVisible(bool visible) {

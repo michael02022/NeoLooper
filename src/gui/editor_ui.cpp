@@ -311,7 +311,7 @@ void EditorUI::drawMenuBar() {
         if (ImGui::MenuItem("Open...", "Ctrl+O")) {
             fileDlgPurpose_ = 0;
             fileDlg_.open(FileDialog::OpenFile, "Open audio",
-                          {".wav", ".aiff", ".aif", ".flac", ".ogg"});
+                          {".wav", ".aiff", ".aif", ".flac", ".ogg", ".mp3"});
         }
         if (ImGui::MenuItem("Export WAV...", nullptr, false, doc_.hasAudio()))
             exportRequested();
@@ -504,6 +504,22 @@ void EditorUI::drawToolbar() {
         ImGui::TextColored(ImVec4(1.f, 0.3f, 0.3f, 1.f), "REC %s",
                            formatTime((double)eng_.recordedFrames(),
                                       eng_.hostSampleRate()).c_str());
+    }
+
+    ImGui::SameLine(0, 18);
+    // --- playback speed --- (auditioning only, never touches the sample --
+    // e.g. checking a loop point in a long file without waiting through it
+    // at 1x; pitch moves with speed, same as scrubbing tape)
+    {
+        float speed = eng_.params.playbackSpeed.load();
+        ImGui::SetNextItemWidth(140);
+        if (ImGui::SliderFloat("##speed", &speed, 0.25f, 4.f, "Speed: %.2fx",
+                               ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp))
+            eng_.params.playbackSpeed.store(speed);
+        if (ImGui::IsItemClicked(1)) eng_.params.playbackSpeed.store(1.f); // right-click: reset
+        ImGui::SetItemTooltip(
+            "Playback speed for auditioning -- doesn't modify the sample.\n"
+            "Right-click to reset to 1x.");
     }
 
     ImGui::SameLine(0, 18);
@@ -1147,7 +1163,7 @@ void EditorUI::handleShortcuts() {
     if (ctrl && ImGui::IsKeyPressed(ImGuiKey_O, false)) {
         fileDlgPurpose_ = 0;
         fileDlg_.open(FileDialog::OpenFile, "Open audio",
-                      {".wav", ".aiff", ".aif", ".flac", ".ogg"});
+                      {".wav", ".aiff", ".aif", ".flac", ".ogg", ".mp3"});
     }
     if (!ctrl && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
         if (doc_.hasSelection()) {

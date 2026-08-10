@@ -1,12 +1,18 @@
 /* Mini host CLAP: carga el .clap, instancia el plugin, procesa audio y
  * comprueba passthrough + estado. Uso: mini_host <ruta al .clap> [gui] */
 #include <clap/clap.h>
-#include <dlfcn.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#define CLAP_TEST_WINDOW_API CLAP_WINDOW_API_WIN32
+#else
+#include <dlfcn.h>
 #include <unistd.h>
+#define CLAP_TEST_WINDOW_API CLAP_WINDOW_API_X11
+#endif
 
 static const void* host_get_extension(const struct clap_host* h, const char* id) {
     (void)h; (void)id;
@@ -59,6 +65,15 @@ int main(int argc, char** argv) {
         fprintf(stderr, "uso: %s <plugin.clap> [gui]\n", argv[0]);
         return 2;
     }
+#ifdef _WIN32
+    HMODULE dl = LoadLibraryA(argv[1]);
+    if (!dl) {
+        fprintf(stderr, "LoadLibrary fallo (error %lu)\n", GetLastError());
+        return 1;
+    }
+    const clap_plugin_entry_t* entry =
+        (const clap_plugin_entry_t*)GetProcAddress(dl, "clap_entry");
+#else
     void* dl = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!dl) {
         fprintf(stderr, "dlopen: %s\n", dlerror());
@@ -66,6 +81,7 @@ int main(int argc, char** argv) {
     }
     const clap_plugin_entry_t* entry =
         (const clap_plugin_entry_t*)dlsym(dl, "clap_entry");
+#endif
     if (!entry) {
         fprintf(stderr, "sin clap_entry\n");
         return 1;
@@ -161,7 +177,10 @@ int main(int argc, char** argv) {
     const clap_plugin_state_t* state =
         (const clap_plugin_state_t*)plug->get_extension(plug, CLAP_EXT_STATE);
     if (state) {
-        MemStream m = {0};
+        // static: 1<<20 bytes is fine on an 8 MB Linux thread stack but
+        // overflows Windows' 1 MB default stack as a plain local.
+        static MemStream m;
+        m.len = m.pos = 0;
         clap_ostream_t os = {.ctx = &m, .write = mem_write};
         if (!state->save(plug, &os)) {
             fprintf(stderr, "state save fallo\n");
@@ -213,8 +232,8 @@ int main(int argc, char** argv) {
         }
         const clap_plugin_gui_t* gui =
             (const clap_plugin_gui_t*)plug->get_extension(plug, CLAP_EXT_GUI);
-        if (gui && gui->is_api_supported(plug, CLAP_WINDOW_API_X11, false)) {
-            if (!gui->create(plug, CLAP_WINDOW_API_X11, false)) {
+        if (gui && gui->is_api_supported(plug, CLAP_TEST_WINDOW_API, false)) {
+            if (!gui->create(plug, CLAP_TEST_WINDOW_API, false)) {
                 fprintf(stderr, "gui create fallo\n");
                 return 1;
             }
@@ -223,7 +242,11 @@ int main(int argc, char** argv) {
             gui->show(plug);
             printf("gui creada y visible (%ux%u), renderizando 4 s...\n", w, h);
             fflush(stdout);
+#ifdef _WIN32
+            Sleep(4000);
+#else
             sleep(4);
+#endif
             gui->destroy(plug);
             printf("gui destruida (OK)\n");
         }

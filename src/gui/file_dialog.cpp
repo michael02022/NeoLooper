@@ -1,13 +1,27 @@
 #include "file_dialog.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
 
 #include "imgui.h"
 
 namespace fs = std::filesystem;
+
+namespace {
+// Case-insensitive less-than (POSIX strcasecmp/Windows _stricmp both need an
+// #ifdef; this doesn't).
+bool iless(const std::string& a, const std::string& b) {
+    size_t n = std::min(a.size(), b.size());
+    for (size_t i = 0; i < n; ++i) {
+        int ca = std::tolower((unsigned char)a[i]);
+        int cb = std::tolower((unsigned char)b[i]);
+        if (ca != cb) return ca < cb;
+    }
+    return a.size() < b.size();
+}
+} // namespace
 
 void FileDialog::open(Mode mode, const char* title,
                       std::vector<std::string> extensions,
@@ -20,6 +34,7 @@ void FileDialog::open(Mode mode, const char* title,
     error_.clear();
     if (cwd_.empty()) {
         const char* home = getenv("HOME");
+        if (!home) home = getenv("USERPROFILE"); // Windows doesn't set HOME
         cwd_ = home ? home : "/";
     }
     snprintf(nameEdit_, sizeof(nameEdit_), "%s", defaultName.c_str());
@@ -58,7 +73,7 @@ void FileDialog::refresh() {
     }
     std::sort(entries_.begin(), entries_.end(), [](const Entry& a, const Entry& b) {
         if (a.isDir != b.isDir) return a.isDir;
-        return strcasecmp(a.name.c_str(), b.name.c_str()) < 0;
+        return iless(a.name, b.name);
     });
     snprintf(pathEdit_, sizeof(pathEdit_), "%s", cwd_.c_str());
     needRefresh_ = false;

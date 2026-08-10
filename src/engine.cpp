@@ -224,8 +224,9 @@ void Engine::process(const float* inL, const float* inR,
         const float cents = params.tuneCents.load();
         const double semis = (note < 0 ? 0.0 : (double)(note - root)) +
                              (double)cents / 100.0;
-        const double ratio =
-            std::pow(2.0, semis / 12.0) * (doc->sampleRate / hostSr);
+        const double ratio = std::pow(2.0, semis / 12.0) *
+                            (doc->sampleRate / hostSr) *
+                            (double)params.playbackSpeed.load();
 
         // effective loop region
         int64_t ls = 0, le = doc->frames();
@@ -247,10 +248,13 @@ void Engine::process(const float* inL, const float* inR,
             // Selection wins over a marked loop when both exist (matches
             // EditorUI::playPressed()'s own priority for where playback
             // starts -- a selection means "audition just this", overriding
-            // whatever loop happens to be marked).
+            // whatever loop happens to be marked). A marked-but-disabled
+            // loop must NOT clip playback to its end -- only an active loop
+            // governs where playback stops/wraps; otherwise it plays to the
+            // true end of the sample.
             if (ssl >= 0 && sse > ssl) {
                 ls = ssl; le = sse;
-            } else if (mls >= 0 && mle > mls) {
+            } else if (looping && mls >= 0 && mle > mls) {
                 ls = mls; le = mle;
             }
             le = std::min(le, doc->frames());
@@ -302,10 +306,12 @@ void Engine::process(const float* inL, const float* inR,
                         pos_ = (double)ls + std::fmod(pos_ - (double)ls,
                                                       (double)(le - ls));
                 } else if (pos_ >= (double)le) {
-                    // le is doc->frames() by default, but narrows to the
-                    // selection or marked loop above when one is set (and
-                    // looping is off) -- so playback stops there instead
-                    // of running past it to the end of the whole document.
+                    // le is doc->frames() by default, but narrows to an
+                    // active selection above (regardless of loop state) --
+                    // so playback stops there instead of running past it to
+                    // the end of the whole document. A marked-but-disabled
+                    // loop does NOT narrow le (see above), so this only
+                    // fires here for a selection.
                     ended = true;
                 }
             }

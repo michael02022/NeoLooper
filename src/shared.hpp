@@ -19,6 +19,12 @@ struct SharedParams {
     std::atomic<int>     rootNote{60};
     std::atomic<float>   tuneCents{0.f}; // -99 .. +99
     std::atomic<bool>    loopEnabled{false};
+    // Playback rate multiplier for auditioning (0.25x .. 4x), independent of
+    // the piano/root-note pitch ratio -- e.g. checking a loop point in a
+    // 3-minute file without waiting through it at 1x. Not a time-stretch:
+    // pitch moves with speed, same as scrubbing tape. Never touches the
+    // document, only how fast the playhead advances (see Engine::process).
+    std::atomic<float>  playbackSpeed{1.f};
 };
 
 // Publishing immutable snapshots to the audio thread. The GUI does set()
