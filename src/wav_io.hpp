@@ -33,7 +33,15 @@ LoadResult loadAudioFile(const std::string& path);
 // Document::toggleBits). scaledDown, if non-null, reports whether that
 // happened.
 // loopStart/loopEnd in frames (end exclusive); loopStart<0 = no loop.
-// tuneCents in [-99, 99].
+// tuneCents in [-99, 99]. includeCue: also embed the 'cue '/'LIST'/'labl'
+// loop markers (broader compatibility, e.g. Unreal Engine's Sound Wave cue
+// points) alongside 'smpl' -- on by default, user-toggleable in the export
+// dialog since some sampler software gets confused by unexpected cue points.
+// loopType: smpl's own loop-type field, forwarded to riffchunks::buildSmpl
+// (0 = forward, 1 = alternating/ping-pong) -- lets a sampler that supports
+// native ping-pong playback loop the file that way without NeoLooper having
+// baked the alternation into the audio itself.
 bool exportWavSmpl(const std::string& path, const AudioData& d, int bitDepth,
                    int64_t loopStart, int64_t loopEnd, int rootNote,
-                   float tuneCents, std::string& errorOut, bool* scaledDown = nullptr);
+                   float tuneCents, std::string& errorOut, bool* scaledDown = nullptr,
+                   bool includeCue = true, int loopType = 0);

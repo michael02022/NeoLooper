@@ -64,7 +64,7 @@ void WaveformView::draw(Document& doc, Engine& eng, Envelopes& env,
 
     AudioDataPtr dp = readOnly ? overrideDoc : doc.data();
     if (!dp || dp->frames() == 0) {
-        const char* msg = "Drop audio here  (WAV / AIFF / FLAC / OGG)  or  File -> Open";
+        const char* msg = "Drop audio here  (WAV / AIFF / FLAC / OGG / MP3)  or  File -> Open";
         ImVec2 ts = ImGui::CalcTextSize(msg);
         dl->AddText(ImVec2(origin.x + (width - ts.x) * 0.5f,
                            origin.y + (waveH - ts.y) * 0.5f),
@@ -172,7 +172,23 @@ void WaveformView::draw(Document& doc, Engine& eng, Envelopes& env,
         return v;
     };
 
-    if (hovered && !readOnly && ImGui::IsMouseClicked(0)) {
+    if (hovered && !readOnly && envHit < 0 && !overLS && !overLE &&
+        ImGui::IsMouseDoubleClicked(0)) {
+        // Double-click: select the "block" the click landed in -- the
+        // region bounded by the sample start/end and, if there's a marked
+        // loop, whichever of loopStart/loopEnd bracket the click. Lets a
+        // double-click grab "before the loop", "the loop", or "after the
+        // loop" as one selection, for quick block-wise processing.
+        int64_t click = (int64_t)std::llround(xToFrame(mouse.x));
+        click = std::min<int64_t>(std::max<int64_t>(0, click), n);
+        int64_t zoneLo = 0, zoneHi = n;
+        if (hasLoop) {
+            if (click < ls) zoneHi = ls;
+            else if (click < le) { zoneLo = ls; zoneHi = le; }
+            else zoneLo = le;
+        }
+        if (zoneHi > zoneLo) doc.setSelection(zoneLo, zoneHi);
+    } else if (hovered && !readOnly && ImGui::IsMouseClicked(0)) {
         dragStartX_ = mouse.x;
         dragMoved_ = false;
         if (envHit >= 0) {

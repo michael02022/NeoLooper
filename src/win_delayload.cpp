@@ -30,6 +30,7 @@ namespace {
 
 const wchar_t* const kSiblingLibs[] = {
     L"FLAC.dll",     L"ogg.dll",     L"vorbis.dll", L"vorbisenc.dll",
+    L"vorbisfile.dll",
     L"opus.dll",     L"mpg123.dll",  L"libmp3lame.DLL",
     L"samplerate.dll", L"sleef.dll", L"sleefdft.dll",
 };

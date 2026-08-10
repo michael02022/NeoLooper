@@ -5,10 +5,13 @@
 #include <random>
 #include <string>
 
+#include "../src/aiff_io.hpp"
 #include "../src/document.hpp"
 #include "../src/engine.hpp"
 #include "../src/fft.hpp"
+#include "../src/flac_io.hpp"
 #include "../src/foreign_metadata.hpp"
+#include "../src/ogg_io.hpp"
 #include "../src/loopmods/auto_loop_finder.hpp"
 #include "../src/loopmods/crossfade_inside_core.hpp"
 #include "../src/loopmods/freeze_loop_dsp.hpp"
@@ -1937,6 +1940,323 @@ int main(int argc, char** argv) {
                 CHECK(maxErr < 1e-6,
                       bits == 16 ? "16-bit: datos exactos (escalados si hace falta, cuantizados)"
                                  : "24-bit: datos exactos (escalados si hace falta, cuantizados)");
+            }
+        }
+    }
+
+    // export FLAC (audio via libsndfile + smpl/cue/labl embebidos como
+    // bloques APPLICATION "riff" via libFLAC) y recarga -- mismo
+    // documento/loop (100..40000, root 69, tune -25) que el bloque WAV de
+    // arriba, para que loadAudioFile() (que ya sabe leer smpl-en-FLAC via
+    // foreign_metadata.cpp) confirme el roundtrip.
+    {
+        for (int bits : {16, 24}) {
+            std::string path = tmpdir + "/neolooper_test" + std::to_string(bits) + ".flac";
+            std::string err;
+            bool scaledDown = false;
+            bool ok = exportFlac(path, *doc.data(), bits, doc.loopStart(), doc.loopEnd(),
+                                 doc.rootNote(), doc.tuneCents(), err, &scaledDown);
+            CHECK(ok, bits == 16 ? "exportar FLAC 16-bit" : "exportar FLAC 24-bit");
+            LoadResult r = loadAudioFile(path);
+            CHECK(r.data != nullptr,
+                  bits == 16 ? "recargar FLAC 16-bit" : "recargar FLAC 24-bit");
+            if (r.data) {
+                CHECK(r.data->frames() == doc.frames(),
+                      bits == 16 ? "FLAC 16-bit roundtrip: longitud" : "FLAC 24-bit roundtrip: longitud");
+                CHECK(r.hasInstrument,
+                      bits == 16 ? "FLAC 16-bit roundtrip: metadata smpl presente"
+                                 : "FLAC 24-bit roundtrip: metadata smpl presente");
+                CHECK(r.loopStart == 100 && r.loopEnd == 40000,
+                      bits == 16 ? "FLAC 16-bit roundtrip: puntos de loop"
+                                 : "FLAC 24-bit roundtrip: puntos de loop");
+                CHECK(r.rootNote == 69 && std::fabs(r.tuneCents + 25.f) < 0.5f,
+                      bits == 16 ? "FLAC 16-bit roundtrip: root note y finetune"
+                                 : "FLAC 24-bit roundtrip: root note y finetune");
+            }
+
+            // El bloque 'cue '/'LIST' no lo lee foreign_metadata.cpp (solo
+            // lo consumen herramientas externas como Unreal), asi que se
+            // verifica por presencia cruda en el archivo en vez de por un
+            // roundtrip propio.
+            std::string raw;
+            FILE* rf = fopen(path.c_str(), "rb");
+            CHECK(rf != nullptr, "FLAC: reabrir para verificar bloque cue/labl embebido");
+            if (rf) {
+                fseek(rf, 0, SEEK_END);
+                long sz = ftell(rf);
+                fseek(rf, 0, SEEK_SET);
+                raw.resize((size_t)sz);
+                if (sz > 0) { size_t got = fread(raw.data(), 1, (size_t)sz, rf); raw.resize(got); }
+                fclose(rf);
+            }
+            CHECK(raw.find("cue ") != std::string::npos,
+                  bits == 16 ? "FLAC 16-bit: chunk 'cue ' embebido" : "FLAC 24-bit: chunk 'cue ' embebido");
+            CHECK(raw.find("LoopStart") != std::string::npos && raw.find("LoopEnd") != std::string::npos,
+                  bits == 16 ? "FLAC 16-bit: etiquetas LoopStart/LoopEnd embebidas"
+                             : "FLAC 24-bit: etiquetas LoopStart/LoopEnd embebidas");
+        }
+    }
+
+    // includeCue=false: el checkbox "Export markers (cues)" del dialogo de
+    // exportacion debe poder omitir el chunk cue/labl (en WAV y FLAC) sin
+    // afectar el smpl (loop/root note/tune siguen intactos).
+    {
+        auto readWhole = [](const std::string& p) {
+            std::string raw;
+            FILE* rf = fopen(p.c_str(), "rb");
+            if (rf) {
+                fseek(rf, 0, SEEK_END);
+                long sz = ftell(rf);
+                fseek(rf, 0, SEEK_SET);
+                raw.resize((size_t)sz);
+                if (sz > 0) { size_t got = fread(raw.data(), 1, (size_t)sz, rf); raw.resize(got); }
+                fclose(rf);
+            }
+            return raw;
+        };
+
+        std::string wpath = tmpdir + "/neolooper_test_nocue.wav";
+        std::string err;
+        CHECK(exportWavSmpl(wpath, *doc.data(), 16, doc.loopStart(), doc.loopEnd(),
+                            doc.rootNote(), doc.tuneCents(), err, nullptr, /*includeCue=*/false),
+              "exportar WAV con includeCue=false");
+        std::string wraw = readWhole(wpath);
+        CHECK(wraw.find("smpl") != std::string::npos, "WAV includeCue=false: 'smpl' sigue presente");
+        CHECK(wraw.find("cue ") == std::string::npos, "WAV includeCue=false: chunk 'cue ' omitido");
+        CHECK(wraw.find("LoopStart") == std::string::npos, "WAV includeCue=false: etiquetas labl omitidas");
+        LoadResult wr = loadAudioFile(wpath);
+        CHECK(wr.hasInstrument && wr.loopStart == 100 && wr.loopEnd == 40000,
+              "WAV includeCue=false: loop sigue recuperandose via smpl");
+
+        std::string fpath = tmpdir + "/neolooper_test_nocue.flac";
+        CHECK(exportFlac(fpath, *doc.data(), 16, doc.loopStart(), doc.loopEnd(),
+                         doc.rootNote(), doc.tuneCents(), err, nullptr, /*includeCue=*/false),
+              "exportar FLAC con includeCue=false");
+        std::string fraw = readWhole(fpath);
+        CHECK(fraw.find("cue ") == std::string::npos, "FLAC includeCue=false: chunk 'cue ' omitido");
+        CHECK(fraw.find("LoopStart") == std::string::npos, "FLAC includeCue=false: etiquetas labl omitidas");
+        LoadResult fr = loadAudioFile(fpath);
+        CHECK(fr.hasInstrument && fr.loopStart == 100 && fr.loopEnd == 40000,
+              "FLAC includeCue=false: loop sigue recuperandose via smpl");
+    }
+
+    // loopType=1 (ping-pong): el combo "Loop type" del dialogo de Export
+    // WAV debe llegar hasta el campo 'type' del loop record dentro de
+    // 'smpl' (offset +48 desde el tag: tag+size+9 campos de 4 bytes del
+    // encabezado = 44, luego cueId(4) antes de type). No hay lector de
+    // este campo en LoadResult, asi que se verifica leyendo el byte crudo.
+    {
+        auto readWhole = [](const std::string& p) {
+            std::string raw;
+            FILE* rf = fopen(p.c_str(), "rb");
+            if (rf) {
+                fseek(rf, 0, SEEK_END);
+                long sz = ftell(rf);
+                fseek(rf, 0, SEEK_SET);
+                raw.resize((size_t)sz);
+                if (sz > 0) { size_t got = fread(raw.data(), 1, (size_t)sz, rf); raw.resize(got); }
+                fclose(rf);
+            }
+            return raw;
+        };
+        auto smplLoopType = [](const std::string& raw) -> int {
+            size_t pos = raw.find("smpl");
+            if (pos == std::string::npos || pos + 52 > raw.size()) return -1;
+            const unsigned char* p = (const unsigned char*)raw.data() + pos + 48;
+            return (int)p[0] | ((int)p[1] << 8) | ((int)p[2] << 16) | ((int)p[3] << 24);
+        };
+
+        std::string fwdPath = tmpdir + "/neolooper_test_loopfwd.wav";
+        std::string err;
+        CHECK(exportWavSmpl(fwdPath, *doc.data(), 16, doc.loopStart(), doc.loopEnd(),
+                            doc.rootNote(), doc.tuneCents(), err, nullptr,
+                            /*includeCue=*/true, /*loopType=*/0),
+              "exportar WAV con loopType=0 (forward)");
+        CHECK(smplLoopType(readWhole(fwdPath)) == 0, "WAV: smpl type field es 0 (forward)");
+
+        std::string ppPath = tmpdir + "/neolooper_test_looppp.wav";
+        CHECK(exportWavSmpl(ppPath, *doc.data(), 16, doc.loopStart(), doc.loopEnd(),
+                            doc.rootNote(), doc.tuneCents(), err, nullptr,
+                            /*includeCue=*/true, /*loopType=*/1),
+              "exportar WAV con loopType=1 (ping-pong)");
+        CHECK(smplLoopType(readWhole(ppPath)) == 1, "WAV: smpl type field es 1 (ping-pong)");
+    }
+
+    // export AIFF (COMM/SSND big-endian PCM + MARK/INST) y recarga --
+    // mismo documento/loop (100..40000, root 69, tune -25) que los bloques
+    // WAV/FLAC de arriba. loadAudioFile() pasa primero por libsndfile (que
+    // sabe leer MARK/INST espec-compliant via el cruce de IDs) y solo cae
+    // al fallback de foreign_metadata.cpp (que empareja por NOMBRE de
+    // marcador) si libsndfile no encuentra nada -- este export deberia
+    // funcionar por CUALQUIERA de los dos caminos.
+    {
+        for (int bits : {16, 24}) {
+            std::string path = tmpdir + "/neolooper_test" + std::to_string(bits) + ".aiff";
+            std::string err;
+            bool scaledDown = false;
+            bool ok = exportAiff(path, *doc.data(), bits, doc.loopStart(), doc.loopEnd(),
+                                 doc.rootNote(), doc.tuneCents(), err, &scaledDown);
+            CHECK(ok, bits == 16 ? "exportar AIFF 16-bit" : "exportar AIFF 24-bit");
+            LoadResult r = loadAudioFile(path);
+            CHECK(r.data != nullptr,
+                  bits == 16 ? "recargar AIFF 16-bit" : "recargar AIFF 24-bit");
+            if (r.data) {
+                CHECK(r.data->frames() == doc.frames(),
+                      bits == 16 ? "AIFF 16-bit roundtrip: longitud" : "AIFF 24-bit roundtrip: longitud");
+                CHECK(r.data->channels() == 2,
+                      bits == 16 ? "AIFF 16-bit roundtrip: canales" : "AIFF 24-bit roundtrip: canales");
+                CHECK(r.hasInstrument,
+                      bits == 16 ? "AIFF 16-bit roundtrip: metadata MARK/INST presente"
+                                 : "AIFF 24-bit roundtrip: metadata MARK/INST presente");
+                CHECK(r.loopStart == 100 && r.loopEnd == 40000,
+                      bits == 16 ? "AIFF 16-bit roundtrip: puntos de loop"
+                                 : "AIFF 24-bit roundtrip: puntos de loop");
+                CHECK(r.rootNote == 69 && std::fabs(r.tuneCents + 25.f) < 1.5f,
+                      bits == 16 ? "AIFF 16-bit roundtrip: root note y finetune (redondeado a cents enteros)"
+                                 : "AIFF 24-bit roundtrip: root note y finetune (redondeado a cents enteros)");
+            }
+        }
+
+        // Sin loop: INST (root note/tune) se sigue escribiendo, pero sin
+        // MARK ni sustainLoop (playMode/ids en 0).
+        std::string npath = tmpdir + "/neolooper_test_noloop.aiff";
+        std::string err;
+        CHECK(exportAiff(npath, *doc.data(), 16, -1, -1, 60, 0.f, err),
+              "exportar AIFF sin loop");
+        LoadResult nr = loadAudioFile(npath);
+        CHECK(nr.data != nullptr && nr.data->frames() == doc.frames(),
+              "AIFF sin loop: recarga con la longitud correcta");
+        CHECK(!(nr.hasInstrument && nr.loopStart >= 0),
+              "AIFF sin loop: no reporta loop (aunque INST siga trayendo root note)");
+
+        // lpMarkerNames=true: variante "LpBeg "/"LpEnd " (tambien reconocida
+        // por foreign_metadata.cpp) en vez de "beg loop"/"end loop".
+        std::string lppath = tmpdir + "/neolooper_test_lpnames.aiff";
+        CHECK(exportAiff(lppath, *doc.data(), 16, doc.loopStart(), doc.loopEnd(),
+                         doc.rootNote(), doc.tuneCents(), err, nullptr, /*lpMarkerNames=*/true),
+              "exportar AIFF con marcadores LpBeg/LpEnd");
+        LoadResult lpr = loadAudioFile(lppath);
+        CHECK(lpr.hasInstrument && lpr.loopStart == 100 && lpr.loopEnd == 40000,
+              "AIFF LpBeg/LpEnd: loop se recupera igual que con beg/end loop");
+    }
+
+    // loopType=1 (ping-pong): el combo "Loop type" del dialogo de Export
+    // AIFF debe llegar hasta INST.sustainLoop.playMode (offset +16 desde
+    // el tag 'INST': tag+size(8) + baseNote/detune/lowNote/highNote/
+    // lowVel/highVel/gain(8) = 16). Por spec AIFF: 1=forward, 2=ping-pong.
+    {
+        auto readWhole = [](const std::string& p) {
+            std::string raw;
+            FILE* rf = fopen(p.c_str(), "rb");
+            if (rf) {
+                fseek(rf, 0, SEEK_END);
+                long sz = ftell(rf);
+                fseek(rf, 0, SEEK_SET);
+                raw.resize((size_t)sz);
+                if (sz > 0) { size_t got = fread(raw.data(), 1, (size_t)sz, rf); raw.resize(got); }
+                fclose(rf);
+            }
+            return raw;
+        };
+        auto instPlayMode = [](const std::string& raw) -> int {
+            size_t pos = raw.find("INST");
+            if (pos == std::string::npos || pos + 18 > raw.size()) return -1;
+            const unsigned char* p = (const unsigned char*)raw.data() + pos + 16;
+            return ((int)p[0] << 8) | (int)p[1];
+        };
+
+        std::string fwdPath = tmpdir + "/neolooper_test_aiff_loopfwd.aiff";
+        std::string err;
+        CHECK(exportAiff(fwdPath, *doc.data(), 16, doc.loopStart(), doc.loopEnd(),
+                         doc.rootNote(), doc.tuneCents(), err, nullptr,
+                         /*lpMarkerNames=*/false, /*loopType=*/0),
+              "exportar AIFF con loopType=0 (forward)");
+        CHECK(instPlayMode(readWhole(fwdPath)) == 1,
+              "AIFF: INST.sustainLoop.playMode es 1 (forward)");
+
+        std::string ppPath = tmpdir + "/neolooper_test_aiff_looppp.aiff";
+        CHECK(exportAiff(ppPath, *doc.data(), 16, doc.loopStart(), doc.loopEnd(),
+                         doc.rootNote(), doc.tuneCents(), err, nullptr,
+                         /*lpMarkerNames=*/false, /*loopType=*/1),
+              "exportar AIFF con loopType=1 (ping-pong)");
+        CHECK(instPlayMode(readWhole(ppPath)) == 2,
+              "AIFF: INST.sustainLoop.playMode es 2 (ping-pong)");
+    }
+
+    // export OGG (con perdida; loop points como comentarios Vorbis) y
+    // recarga -- tanto por presencia cruda de los comentarios (formato de
+    // texto, no un chunk binario) como por el roundtrip real via
+    // readOggLoopTags/loadAudioFile, para las dos variantes de tag que
+    // ofrece el dialogo de exportacion (LOOPLENGTH y LOOPEND).
+    {
+        // Senal propia y limpia (no el 'doc' compartido -- para esta altura
+        // del archivo ya fue mutado por cientos de tests anteriores y su
+        // pico real ya no es el 0.5 original), para poder verificar el
+        // nivel contra un pico conocido.
+        auto od = std::make_shared<AudioData>();
+        od->sampleRate = 44100;
+        od->format = SampleFormat::Float32;
+        od->ch.resize(2);
+        const int on = 44100;
+        for (int c = 0; c < 2; ++c) od->ch[c].resize(on);
+        for (int i = 0; i < on; ++i) {
+            float v = 0.5f * sinf(2.f * (float)M_PI * 440.f * i / 44100.f);
+            od->ch[0][i] = v;
+            od->ch[1][i] = v;
+        }
+        od->buildPeaks();
+
+        auto readWhole = [](const std::string& p) {
+            std::string raw;
+            FILE* rf = fopen(p.c_str(), "rb");
+            if (rf) {
+                fseek(rf, 0, SEEK_END);
+                long sz = ftell(rf);
+                fseek(rf, 0, SEEK_SET);
+                raw.resize((size_t)sz);
+                if (sz > 0) { size_t got = fread(raw.data(), 1, (size_t)sz, rf); raw.resize(got); }
+                fclose(rf);
+            }
+            return raw;
+        };
+
+        for (bool useLoopEndTag : {false, true}) {
+            const char* variant = useLoopEndTag ? "LOOPEND" : "LOOPLENGTH";
+            std::string path = tmpdir + "/neolooper_test_" + variant + ".ogg";
+            std::string err;
+            bool ok = exportOgg(path, *od, /*quality=*/0.5f, 100, 40000, useLoopEndTag, err);
+            CHECK(ok, useLoopEndTag ? "exportar OGG (LOOPEND)" : "exportar OGG (LOOPLENGTH)");
+
+            std::string raw = readWhole(path);
+            CHECK(raw.find("LOOPSTART=100") != std::string::npos,
+                  useLoopEndTag ? "OGG LOOPEND: comentario LOOPSTART correcto"
+                                : "OGG LOOPLENGTH: comentario LOOPSTART correcto");
+            if (useLoopEndTag)
+                CHECK(raw.find("LOOPEND=40000") != std::string::npos,
+                      "OGG LOOPEND: comentario LOOPEND correcto");
+            else
+                CHECK(raw.find("LOOPLENGTH=39900") != std::string::npos,
+                      "OGG LOOPLENGTH: comentario LOOPLENGTH correcto");
+
+            LoadResult r = loadAudioFile(path);
+            CHECK(r.data != nullptr,
+                  useLoopEndTag ? "recargar OGG (LOOPEND)" : "recargar OGG (LOOPLENGTH)");
+            if (r.data) {
+                CHECK(r.data->frames() > 0,
+                      useLoopEndTag ? "OGG LOOPEND roundtrip: hay audio"
+                                    : "OGG LOOPLENGTH roundtrip: hay audio");
+                CHECK(r.data->channels() == 2,
+                      useLoopEndTag ? "OGG LOOPEND roundtrip: canales"
+                                    : "OGG LOOPLENGTH roundtrip: canales");
+                // Con perdida: no se compara muestra a muestra, solo que el
+                // nivel sobrevive en el orden de magnitud correcto (pico
+                // original 0.5).
+                CHECK(r.data->peakAbs() > 0.3f && r.data->peakAbs() < 0.7f,
+                      useLoopEndTag ? "OGG LOOPEND roundtrip: nivel de audio razonable tras la compresion"
+                                    : "OGG LOOPLENGTH roundtrip: nivel de audio razonable tras la compresion");
+                CHECK(r.hasInstrument && r.loopStart == 100 && r.loopEnd == 40000,
+                      useLoopEndTag ? "OGG LOOPEND roundtrip: loop leido via readOggLoopTags"
+                                    : "OGG LOOPLENGTH roundtrip: loop leido via readOggLoopTags");
             }
         }
     }

@@ -38,15 +38,37 @@ void FileDialog::open(Mode mode, const char* title,
         cwd_ = home ? home : "/";
     }
     snprintf(nameEdit_, sizeof(nameEdit_), "%s", defaultName.c_str());
-    optLabel_.clear();
-    optItems_.clear();
-    optIndex_ = 0;
+    combos_.clear();
+    checkboxLabel_.clear();
+    checkboxValue_ = false;
+    sliderLabel_.clear();
+    sliderValue_ = 0.f;
+    infoText_.clear();
 }
 
-void FileDialog::setOptions(const char* label, std::vector<std::string> items, int index) {
-    optLabel_ = label;
-    optItems_ = std::move(items);
-    optIndex_ = std::min((int)optItems_.size() - 1, std::max(0, index));
+int FileDialog::addCombo(const char* label, std::vector<std::string> items, int index) {
+    Combo c;
+    c.label = label;
+    c.index = std::min((int)items.size() - 1, std::max(0, index));
+    c.items = std::move(items);
+    combos_.push_back(std::move(c));
+    return (int)combos_.size() - 1;
+}
+
+void FileDialog::setCheckbox(const char* label, bool defaultValue) {
+    checkboxLabel_ = label;
+    checkboxValue_ = defaultValue;
+}
+
+void FileDialog::setSlider(const char* label, float defaultValue, float min, float max) {
+    sliderLabel_ = label;
+    sliderMin_ = min;
+    sliderMax_ = max;
+    sliderValue_ = std::min(max, std::max(min, defaultValue));
+}
+
+void FileDialog::setInfoText(const char* text) {
+    infoText_ = text;
 }
 
 bool FileDialog::matchesFilter(const std::string& name) const {
@@ -109,7 +131,10 @@ bool FileDialog::draw() {
 
         // listing
         float footer = ((mode_ == SaveFile ? 2.f : 1.f) +
-                        (optItems_.empty() ? 0.f : 1.f)) *
+                        (float)combos_.size() +
+                        (checkboxLabel_.empty() ? 0.f : 1.f) +
+                        (sliderLabel_.empty() ? 0.f : 1.f) +
+                        (infoText_.empty() ? 0.f : 1.f)) *
                            (ImGui::GetFrameHeightWithSpacing()) +
                        8.f;
         if (ImGui::BeginChild("##files", ImVec2(0, -footer), true)) {
@@ -171,16 +196,23 @@ bool FileDialog::draw() {
                                  ImGuiInputTextFlags_EnterReturnsTrue))
                 tryAccept(); // Enter in the name field = Save
         }
-        if (!optItems_.empty()) {
-            ImGui::SetNextItemWidth(180);
-            if (ImGui::BeginCombo(optLabel_.c_str(),
-                                  optItems_[(size_t)optIndex_].c_str())) {
-                for (int i = 0; i < (int)optItems_.size(); ++i)
-                    if (ImGui::Selectable(optItems_[(size_t)i].c_str(), i == optIndex_))
-                        optIndex_ = i;
+        for (auto& c : combos_) {
+            ImGui::SetNextItemWidth(220);
+            if (ImGui::BeginCombo(c.label.c_str(), c.items[(size_t)c.index].c_str())) {
+                for (int i = 0; i < (int)c.items.size(); ++i)
+                    if (ImGui::Selectable(c.items[(size_t)i].c_str(), i == c.index))
+                        c.index = i;
                 ImGui::EndCombo();
             }
         }
+        if (!checkboxLabel_.empty())
+            ImGui::Checkbox(checkboxLabel_.c_str(), &checkboxValue_);
+        if (!sliderLabel_.empty()) {
+            ImGui::SetNextItemWidth(180);
+            ImGui::SliderFloat(sliderLabel_.c_str(), &sliderValue_, sliderMin_, sliderMax_, "%.2f");
+        }
+        if (!infoText_.empty())
+            ImGui::TextDisabled("%s", infoText_.c_str());
         if (!error_.empty())
             ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "%s", error_.c_str());
         const char* okLabel = mode_ == OpenFile ? "Open" : "Save";

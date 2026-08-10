@@ -8,7 +8,10 @@
 
 #include "IconsFontAwesome4.h"
 
+#include "../aiff_io.hpp"
 #include "../fft.hpp"
+#include "../flac_io.hpp"
+#include "../ogg_io.hpp"
 #include "../wav_io.hpp"
 #include "../loopmods/classic_crossfade.hpp"
 #include "../loopmods/classic_crossfade_inside.hpp"
@@ -165,9 +168,40 @@ void EditorUI::exportRequested() {
     fileDlgPurpose_ = 1;
     std::string base = doc_.sampleName().empty() ? "loop" : doc_.sampleName();
     fileDlg_.open(FileDialog::SaveFile, "Export WAV", {".wav"}, base + ".wav");
-    fileDlg_.setOptions("Depth",
-                        {"16-bit PCM", "24-bit PCM", "32-bit float"},
-                        exportBitsIdx_);
+    fileDlg_.addCombo("Depth", {"16-bit PCM", "24-bit PCM", "32-bit float"}, exportBitsIdx_);
+    fileDlg_.addCombo("Loop type", {"Forward", "Alternating (ping-pong)"}, exportWavLoopTypeIdx_);
+    fileDlg_.setCheckbox("Export markers (cues)", exportCuesEnabled_);
+}
+
+void EditorUI::exportFlacRequested() {
+    if (!doc_.hasAudio()) return;
+    fileDlgPurpose_ = 2;
+    std::string base = doc_.sampleName().empty() ? "loop" : doc_.sampleName();
+    fileDlg_.open(FileDialog::SaveFile, "Export FLAC", {".flac"}, base + ".flac");
+    fileDlg_.addCombo("Depth", {"16-bit PCM", "24-bit PCM"}, exportFlacBitsIdx_);
+    fileDlg_.setCheckbox("Export markers (cues)", exportCuesEnabled_);
+}
+
+void EditorUI::exportOggRequested() {
+    if (!doc_.hasAudio()) return;
+    fileDlgPurpose_ = 3;
+    std::string base = doc_.sampleName().empty() ? "loop" : doc_.sampleName();
+    fileDlg_.open(FileDialog::SaveFile, "Export OGG", {".ogg"}, base + ".ogg");
+    fileDlg_.addCombo("Loop tags", {"LOOPSTART / LOOPLENGTH", "LOOPSTART / LOOPEND"},
+                      exportOggLoopTagIdx_);
+    fileDlg_.setSlider("Quality", exportOggQuality_, 0.0f, 1.0f);
+    fileDlg_.setInfoText("Note: OGG won't export Root Note and Tune.");
+}
+
+void EditorUI::exportAiffRequested() {
+    if (!doc_.hasAudio()) return;
+    fileDlgPurpose_ = 4;
+    std::string base = doc_.sampleName().empty() ? "loop" : doc_.sampleName();
+    fileDlg_.open(FileDialog::SaveFile, "Export AIFF", {".aiff", ".aif"}, base + ".aiff");
+    fileDlg_.addCombo("Depth", {"16-bit PCM", "24-bit PCM"}, exportAiffBitsIdx_);
+    fileDlg_.addCombo("Markers", {"beg loop / end loop", "LpBeg / LpEnd"},
+                      exportAiffLpNames_ ? 1 : 0);
+    fileDlg_.addCombo("Loop type", {"Forward", "Alternating (ping-pong)"}, exportAiffLoopTypeIdx_);
 }
 
 bool EditorUI::anyModuleOpen() const {
@@ -315,6 +349,12 @@ void EditorUI::drawMenuBar() {
         }
         if (ImGui::MenuItem("Export WAV...", nullptr, false, doc_.hasAudio()))
             exportRequested();
+        if (ImGui::MenuItem("Export AIFF...", nullptr, false, doc_.hasAudio()))
+            exportAiffRequested();
+        if (ImGui::MenuItem("Export FLAC...", nullptr, false, doc_.hasAudio()))
+            exportFlacRequested();
+        if (ImGui::MenuItem("Export OGG...", nullptr, false, doc_.hasAudio()))
+            exportOggRequested();
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Edit")) {
@@ -507,22 +547,6 @@ void EditorUI::drawToolbar() {
     }
 
     ImGui::SameLine(0, 18);
-    // --- playback speed --- (auditioning only, never touches the sample --
-    // e.g. checking a loop point in a long file without waiting through it
-    // at 1x; pitch moves with speed, same as scrubbing tape)
-    {
-        float speed = eng_.params.playbackSpeed.load();
-        ImGui::SetNextItemWidth(140);
-        if (ImGui::SliderFloat("##speed", &speed, 0.25f, 4.f, "Speed: %.2fx",
-                               ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp))
-            eng_.params.playbackSpeed.store(speed);
-        if (ImGui::IsItemClicked(1)) eng_.params.playbackSpeed.store(1.f); // right-click: reset
-        ImGui::SetItemTooltip(
-            "Playback speed for auditioning -- doesn't modify the sample.\n"
-            "Right-click to reset to 1x.");
-    }
-
-    ImGui::SameLine(0, 18);
     // --- format ---
     AudioDataPtr d = doc_.data();
     if (toolbarButton(d ? formatName(d->format) : "bits", has))
@@ -625,6 +649,22 @@ void EditorUI::drawToolbar() {
     ImGui::SameLine();
     if (toolbarButton(ICON_FA_REPEAT " Redo", doc_.canRedo())) doc_.redo();
 
+    ImGui::SameLine(0, 24);
+    // --- playback speed --- (auditioning only, never touches the sample --
+    // e.g. checking a loop point in a long file without waiting through it
+    // at 1x; pitch moves with speed, same as scrubbing tape)
+    {
+        float speed = eng_.params.playbackSpeed.load();
+        ImGui::SetNextItemWidth(140);
+        if (ImGui::SliderFloat("##speed", &speed, 0.25f, 4.f, "Speed: %.2fx",
+                               ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp))
+            eng_.params.playbackSpeed.store(speed);
+        if (ImGui::IsItemClicked(1)) eng_.params.playbackSpeed.store(1.f); // right-click: reset
+        ImGui::SetItemTooltip(
+            "Playback speed for auditioning -- doesn't modify the sample.\n"
+            "Right-click to reset to 1x.");
+    }
+
     // Indicates whether a processing module is open (modules are now opened
     // from the Process menu, see drawMenuBar).
     for (auto& m : modules_) {
@@ -703,6 +743,7 @@ void EditorUI::drawToolbar() {
         ImGui::OpenPopup("Auto Loop");
         autoLoopPopup_ = false;
         autoLoopResults_.clear();
+        autoLoopPreviewSaved_ = false;
     }
     if (ImGui::BeginPopupModal("Auto Loop", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextWrapped(
@@ -759,14 +800,54 @@ void EditorUI::drawToolbar() {
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
+        // The popup is modal (blocks the main toolbar entirely), so Play
+        // loop/Stop reuse the SAME play-from-selection logic already used
+        // everywhere else (playPressed()/stopPressed()) instead of a new
+        // playback path: the first press saves whatever selection the user
+        // had, swaps it to the candidate's start/end loop (so
+        // playPressed() naturally starts there and the marked loop wraps
+        // it), and Stop swaps the original selection back.
+        ImGui::BeginDisabled(!doc_.hasLoop());
+        if (ImGui::Button("Play loop", ImVec2(100, 0))) {
+            if (!autoLoopPreviewSaved_) {
+                autoLoopHadSelection_ = doc_.hasSelection();
+                autoLoopSavedSelStart_ = doc_.selStart();
+                autoLoopSavedSelEnd_ = doc_.selEnd();
+                autoLoopPreviewSaved_ = true;
+            }
+            doc_.setSelection(doc_.loopStart(), doc_.loopEnd());
+            eng_.params.loopEnabled.store(true);
+            playPressed();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Stop", ImVec2(80, 0))) {
+            if (autoLoopPreviewSaved_) {
+                if (autoLoopHadSelection_)
+                    doc_.setSelection(autoLoopSavedSelStart_, autoLoopSavedSelEnd_);
+                else
+                    doc_.clearSelection();
+                autoLoopPreviewSaved_ = false;
+            }
+            stopPressed();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
         if (ImGui::Button("Close")) {
+            if (autoLoopPreviewSaved_) {
+                if (autoLoopHadSelection_)
+                    doc_.setSelection(autoLoopSavedSelStart_, autoLoopSavedSelEnd_);
+                else
+                    doc_.clearSelection();
+                autoLoopPreviewSaved_ = false;
+                stopPressed();
+            }
             autoLoopResults_.clear();
             ImGui::CloseCurrentPopup();
         }
 
         if (!autoLoopResults_.empty()) {
             ImGui::Separator();
-            ImGui::TextUnformatted("Candidates (best first) -- click one to try it, then Play/Loop to listen:");
+            ImGui::TextUnformatted("Candidates (best first) -- click one to try it, then \"Play loop\" above to listen:");
             ImGui::BeginChild("##autoLoopResults", ImVec2(420, std::min(160.f, 22.f * autoLoopResults_.size())),
                               ImGuiChildFlags_Borders);
             for (int i = 0; i < (int)autoLoopResults_.size(); ++i) {
@@ -1101,17 +1182,73 @@ void EditorUI::drawDialogs() {
     if (fileDlg_.draw()) {
         if (fileDlgPurpose_ == 0) {
             openPath(fileDlg_.result());
-        } else {
+        } else if (fileDlgPurpose_ == 1) {
             AudioDataPtr d = doc_.data();
             if (d) {
-                exportBitsIdx_ = fileDlg_.optionIndex();
+                exportBitsIdx_ = fileDlg_.comboValue(0);
+                exportWavLoopTypeIdx_ = fileDlg_.comboValue(1);
+                exportCuesEnabled_ = fileDlg_.checkboxValue();
                 const int bitDepths[] = {16, 24, 32};
                 std::string err;
                 bool scaledDown = false;
                 if (exportWavSmpl(fileDlg_.result(), *d,
                                   bitDepths[std::min(2, std::max(0, exportBitsIdx_))],
                                   doc_.loopStart(), doc_.loopEnd(), doc_.rootNote(),
-                                  doc_.tuneCents(), err, &scaledDown))
+                                  doc_.tuneCents(), err, &scaledDown, exportCuesEnabled_,
+                                  exportWavLoopTypeIdx_))
+                    pushToast(scaledDown
+                                  ? "Exported: " + fileDlg_.result() +
+                                        " (amplitude scaled down to fit the chosen bit depth)"
+                                  : "Exported: " + fileDlg_.result());
+                else
+                    pushToast("Error exporting: " + err);
+            }
+        } else if (fileDlgPurpose_ == 2) {
+            AudioDataPtr d = doc_.data();
+            if (d) {
+                exportFlacBitsIdx_ = fileDlg_.comboValue(0);
+                exportCuesEnabled_ = fileDlg_.checkboxValue();
+                const int bitDepths[] = {16, 24};
+                std::string err;
+                bool scaledDown = false;
+                if (exportFlac(fileDlg_.result(), *d,
+                               bitDepths[std::min(1, std::max(0, exportFlacBitsIdx_))],
+                               doc_.loopStart(), doc_.loopEnd(), doc_.rootNote(),
+                               doc_.tuneCents(), err, &scaledDown, exportCuesEnabled_))
+                    pushToast(scaledDown
+                                  ? "Exported: " + fileDlg_.result() +
+                                        " (amplitude scaled down to fit the chosen bit depth)"
+                                  : "Exported: " + fileDlg_.result());
+                else
+                    pushToast("Error exporting: " + err);
+            }
+        } else if (fileDlgPurpose_ == 3) {
+            AudioDataPtr d = doc_.data();
+            if (d) {
+                exportOggLoopTagIdx_ = fileDlg_.comboValue(0);
+                exportOggQuality_ = fileDlg_.sliderValue();
+                std::string err;
+                if (exportOgg(fileDlg_.result(), *d, exportOggQuality_,
+                              doc_.loopStart(), doc_.loopEnd(),
+                              exportOggLoopTagIdx_ == 1, err))
+                    pushToast("Exported: " + fileDlg_.result());
+                else
+                    pushToast("Error exporting: " + err);
+            }
+        } else if (fileDlgPurpose_ == 4) {
+            AudioDataPtr d = doc_.data();
+            if (d) {
+                exportAiffBitsIdx_ = fileDlg_.comboValue(0);
+                exportAiffLpNames_ = fileDlg_.comboValue(1) == 1;
+                exportAiffLoopTypeIdx_ = fileDlg_.comboValue(2);
+                const int bitDepths[] = {16, 24};
+                std::string err;
+                bool scaledDown = false;
+                if (exportAiff(fileDlg_.result(), *d,
+                               bitDepths[std::min(1, std::max(0, exportAiffBitsIdx_))],
+                               doc_.loopStart(), doc_.loopEnd(), doc_.rootNote(),
+                               doc_.tuneCents(), err, &scaledDown, exportAiffLpNames_,
+                               exportAiffLoopTypeIdx_))
                     pushToast(scaledDown
                                   ? "Exported: " + fileDlg_.result() +
                                         " (amplitude scaled down to fit the chosen bit depth)"

@@ -39,20 +39,90 @@ if(WIN32)
       IMPORTED_LOCATION "${RUBBERBAND_LIBRARY}"
       INTERFACE_INCLUDE_DIRECTORIES "${RUBBERBAND_INCLUDE_DIR}")
   endif()
+
+  # FLAC (flac_io.cpp: libFLAC's metadata-chain API embeds loop/cue chunks
+  # into the FLAC files libsndfile writes) + Vorbis/vorbisenc/Ogg (ogg_io.cpp:
+  # hand-rolled encoder, since libsndfile can't write custom Vorbis comment
+  # tags like LOOPSTART/LOOPLENGTH). Same defensive CONFIG-then-find_library
+  # fallback as rubberband above -- vcpkg's exported target names for these
+  # three have varied across versions.
+  find_package(FLAC CONFIG QUIET)
+  if(NOT TARGET FLAC::FLAC)
+    find_path(FLAC_INCLUDE_DIR NAMES FLAC/metadata.h)
+    find_library(FLAC_LIBRARY NAMES FLAC libFLAC)
+    if(NOT FLAC_INCLUDE_DIR OR NOT FLAC_LIBRARY)
+      message(FATAL_ERROR "FLAC not found -- vcpkg install libflac")
+    endif()
+    add_library(FLAC::FLAC UNKNOWN IMPORTED)
+    set_target_properties(FLAC::FLAC PROPERTIES
+      IMPORTED_LOCATION "${FLAC_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${FLAC_INCLUDE_DIR}")
+  endif()
+
+  find_package(Ogg CONFIG QUIET)
+  if(NOT TARGET Ogg::ogg)
+    find_path(OGG_INCLUDE_DIR NAMES ogg/ogg.h)
+    find_library(OGG_LIBRARY NAMES ogg)
+    if(NOT OGG_INCLUDE_DIR OR NOT OGG_LIBRARY)
+      message(FATAL_ERROR "Ogg not found -- vcpkg install libogg")
+    endif()
+    add_library(Ogg::ogg UNKNOWN IMPORTED)
+    set_target_properties(Ogg::ogg PROPERTIES
+      IMPORTED_LOCATION "${OGG_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${OGG_INCLUDE_DIR}")
+  endif()
+
+  find_package(Vorbis CONFIG QUIET)
+  if(NOT TARGET Vorbis::vorbis OR NOT TARGET Vorbis::vorbisenc OR NOT TARGET Vorbis::vorbisfile)
+    find_path(VORBIS_INCLUDE_DIR NAMES vorbis/codec.h)
+    find_library(VORBIS_LIBRARY NAMES vorbis)
+    find_library(VORBISENC_LIBRARY NAMES vorbisenc)
+    find_library(VORBISFILE_LIBRARY NAMES vorbisfile)
+    if(NOT VORBIS_INCLUDE_DIR OR NOT VORBIS_LIBRARY OR NOT VORBISENC_LIBRARY OR NOT VORBISFILE_LIBRARY)
+      message(FATAL_ERROR "Vorbis not found -- vcpkg install libvorbis")
+    endif()
+    add_library(Vorbis::vorbis UNKNOWN IMPORTED)
+    set_target_properties(Vorbis::vorbis PROPERTIES
+      IMPORTED_LOCATION "${VORBIS_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${VORBIS_INCLUDE_DIR}")
+    add_library(Vorbis::vorbisenc UNKNOWN IMPORTED)
+    set_target_properties(Vorbis::vorbisenc PROPERTIES
+      IMPORTED_LOCATION "${VORBISENC_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${VORBIS_INCLUDE_DIR}")
+    add_library(Vorbis::vorbisfile UNKNOWN IMPORTED)
+    set_target_properties(Vorbis::vorbisfile PROPERTIES
+      IMPORTED_LOCATION "${VORBISFILE_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${VORBIS_INCLUDE_DIR}")
+  endif()
 else()
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
   pkg_check_modules(RUBBERBAND REQUIRED IMPORTED_TARGET rubberband)
+  pkg_check_modules(FLAC REQUIRED IMPORTED_TARGET flac)
+  pkg_check_modules(VORBIS REQUIRED IMPORTED_TARGET vorbis)
+  pkg_check_modules(VORBISENC REQUIRED IMPORTED_TARGET vorbisenc)
+  pkg_check_modules(VORBISFILE REQUIRED IMPORTED_TARGET vorbisfile)
+  pkg_check_modules(OGG REQUIRED IMPORTED_TARGET ogg)
   find_package(X11 REQUIRED)
 endif()
 
 if(WIN32)
   set(SNDFILE_TARGET SndFile::sndfile)
   set(RUBBERBAND_TARGET RubberBand::rubberband)
+  set(FLAC_TARGET FLAC::FLAC)
+  set(VORBIS_TARGET Vorbis::vorbis)
+  set(VORBISENC_TARGET Vorbis::vorbisenc)
+  set(VORBISFILE_TARGET Vorbis::vorbisfile)
+  set(OGG_TARGET Ogg::ogg)
   set(M_LIB "")
 else()
   set(SNDFILE_TARGET PkgConfig::SNDFILE)
   set(RUBBERBAND_TARGET PkgConfig::RUBBERBAND)
+  set(FLAC_TARGET PkgConfig::FLAC)
+  set(VORBIS_TARGET PkgConfig::VORBIS)
+  set(VORBISENC_TARGET PkgConfig::VORBISENC)
+  set(VORBISFILE_TARGET PkgConfig::VORBISFILE)
+  set(OGG_TARGET PkgConfig::OGG)
   set(M_LIB m)
 endif()
 
@@ -165,6 +235,10 @@ add_library(neolooper MODULE
   src/resampler.cpp
   src/wav_io.cpp
   src/foreign_metadata.cpp
+  src/riff_chunks.cpp
+  src/flac_io.cpp
+  src/ogg_io.cpp
+  src/aiff_io.cpp
   ${GUI_WINDOW_SRC}
   ${WIN_DELAYLOAD_SRC}
   src/gui/editor_ui.cpp
@@ -235,6 +309,11 @@ target_include_directories(neolooper PRIVATE
 target_link_libraries(neolooper PRIVATE
   ${SNDFILE_TARGET}
   ${RUBBERBAND_TARGET}
+  ${FLAC_TARGET}
+  ${VORBIS_TARGET}
+  ${VORBISENC_TARGET}
+  ${VORBISFILE_TARGET}
+  ${OGG_TARGET}
   OpenGL::GL
   Threads::Threads
 )
@@ -243,7 +322,17 @@ if(WIN32)
   # DragQueryFile); user32: window/message-loop APIs; delayimp: runtime
   # support for the /DELAYLOAD imports resolved in src/win_delayload.cpp.
   target_link_libraries(neolooper PRIVATE gdi32 shell32 user32 delayimp)
-  target_link_options(neolooper PRIVATE /DELAYLOAD:sndfile.dll /DELAYLOAD:rubberband-3.dll)
+  # FLAC/ogg/vorbis/vorbisenc/vorbisfile are now DIRECT imports (flac_io.cpp/
+  # ogg_io.cpp), not just sndfile.dll's transitive dependencies --
+  # src/win_delayload.cpp already primes all of these as "sibling libs"
+  # before sndfile.dll loads, but that priming only helps if they're ALSO
+  # delay-loaded themselves; otherwise the OS resolves them at plugin-load
+  # time via the host's own (wrong) search path, same problem
+  # sndfile.dll/rubberband-3.dll had.
+  target_link_options(neolooper PRIVATE
+    /DELAYLOAD:sndfile.dll /DELAYLOAD:rubberband-3.dll
+    /DELAYLOAD:FLAC.dll /DELAYLOAD:ogg.dll /DELAYLOAD:vorbis.dll
+    /DELAYLOAD:vorbisenc.dll /DELAYLOAD:vorbisfile.dll)
   # "sndfile.dll" is a common name other audio software might also bundle;
   # ship our copy under a plugin-unique name so a host process that loads
   # many plugins together (a DAW) can never resolve someone else's
@@ -280,6 +369,10 @@ add_executable(core_test
   src/resampler.cpp
   src/wav_io.cpp
   src/foreign_metadata.cpp
+  src/riff_chunks.cpp
+  src/flac_io.cpp
+  src/ogg_io.cpp
+  src/aiff_io.cpp
   src/loopmods/harmonic_loop_dsp.cpp
   src/loopmods/spectral_loop_core.cpp
   src/loopmods/freeze_loop_dsp.cpp
@@ -302,4 +395,7 @@ add_executable(core_test
   ${LORIS_SRC}
 )
 target_include_directories(core_test PRIVATE src third_party ${LORIS_DIR} ${SIGNALSMITH_STRETCH_DIR})
-target_link_libraries(core_test PRIVATE ${SNDFILE_TARGET} ${RUBBERBAND_TARGET} Threads::Threads ${M_LIB})
+target_link_libraries(core_test PRIVATE
+  ${SNDFILE_TARGET} ${RUBBERBAND_TARGET} ${FLAC_TARGET} ${VORBIS_TARGET} ${VORBISENC_TARGET}
+  ${VORBISFILE_TARGET} ${OGG_TARGET}
+  Threads::Threads ${M_LIB})

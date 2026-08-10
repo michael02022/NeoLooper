@@ -25,10 +25,22 @@ bool tagIs(const uint8_t* p, const char* tag) { return memcmp(p, tag, 4) == 0; }
 void parseWavSmpl(const std::vector<uint8_t>& p, InstrumentInfo& out) {
     if (p.size() < 36) return;
     out.hasNote = true;
-    out.rootNote = std::clamp((int)le32(&p[12]), 0, 127);
+    int unity = std::clamp((int)le32(&p[12]), 0, 127);
     // midiPitchFraction: fraction of a semitone upward, in units of 1/2^32
-    // of a semitone -- inverse of exportWavSmpl's pitchFrac computation.
-    out.tuneCents = (float)((double)le32(&p[16]) / 4294967296.0 * 100.0);
+    // of a semitone -- inverse of exportWavSmpl's/riffchunks::buildSmpl's
+    // pitchFrac computation, always in [0,100) cents. >50 cents is
+    // equivalent to the next note minus the complement -- same
+    // reconstruction wav_io.cpp applies to libsndfile's own
+    // SFC_GET_INSTRUMENT detune for the WAV path, needed here too since
+    // this is the ONLY path FLAC's smpl-in-APPLICATION-block goes through
+    // (libsndfile never supports SFC_GET_INSTRUMENT for FLAC).
+    float cents = (float)((double)le32(&p[16]) / 4294967296.0 * 100.0);
+    if (cents > 50.f) {
+        unity += 1;
+        cents -= 100.f;
+    }
+    out.rootNote = unity;
+    out.tuneCents = cents;
 
     const uint32_t numLoops = le32(&p[28]);
     if (numLoops > 0 && p.size() >= 36 + 16) {
