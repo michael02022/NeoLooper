@@ -49,7 +49,7 @@ const clap_plugin_descriptor_t kDesc = {
     .url = "https://github.com/michael02022/NeoLooper",
     .manual_url = "",
     .support_url = "",
-    .version = "0.1.0",
+    .version = "1.0.0",
     .description = "Audio editor for looping samples, Edison-inspired. "
                    "Record, edit, mark loops with crossfades, import "
                    "WAV/AIFF/FLAC/OGG/MP3, and export WAV+smpl.",
