@@ -198,3 +198,7 @@ pair.
 
 See [special_thanks.txt](special_thanks.txt) for the third-party algorithms
 and libraries this project builds on.
+
+## Note for transparency
+
+I need to say this: I'm not a C++ programmer and I did this with the help of Claude. This was designed based on years of experience manipulating samples and mixing the right ingredients for a one solution tool for this task. Everything specified here was made based on being practical and useful. You're free to not use it if you don't like the way it was created. And for those who are grateful, thank you and I'll try my best to make it work on more platforms. 
