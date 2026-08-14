@@ -5,6 +5,12 @@ Available on Linux and Windows (macOS is under consideration).
 
 Tested on Reaper (Linux X11 and Windows); feedback is welcome.
 
+On Linux the `.clap` doesn't bundle its runtime libraries (unlike Windows). If needed:
+
+```sh
+sudo apt install libsndfile1 librubberband2 libvorbisfile3
+```
+
 ![screenshot](docs/screenshot.png)
 
 ## Features
@@ -69,6 +75,8 @@ It uses the same algorithm to create a mirror of the same played frequencies (it
 
 #### Freeze
 As the name suggests, it "freezes" the frequencies to create a 1-cycle loop average of a specific position of the sample. It makes the process easier but with a small tune inconsistency due to the nature of the method. This can be improved by tuning the attack of the sample (Process -> Pitch) to match the tune of the loop. Experiment with the FFT window size. This is the easiest and most accurate approach for small/micro samples on cheap/low-memory gear from the 90s (SNES, Roland S-550, AKAI S2000, ...).
+
+**Keep in mind to make this work correctly you have to set the right root note of the sample.**
 
 #### Freeze Stretch
 This one uses Signalsmith with the lowest value of stretching to create an ethereal effect on the sample. Added for experimental sound design.
