@@ -31,13 +31,14 @@ sudo apt install libsndfile1 librubberband2 libvorbisfile3
 
 ### Autoloop
 
-Features an autoloop button that searches for possible loop points inside the sample. It includes two methods. Make a selection before running autoloop so it searches only within that zone. Useful for repeated waveforms like winds or synths.
+Features an autoloop button that searches for possible loop points inside the sample. It includes three methods: milselarch (autolooper), Lars Palo (LoopAuditioneer) and Semicycle match, which splices right after zero crossings whose local waveform shape matches (Short mode: a fixed number of cycles; Long mode: any length within a range, refined sample by sample). Make a selection before running autoloop so it searches only within that zone. Useful for repeated waveforms like winds or synths.
 
 ### Process
 
 You can process the sample with these methods:
 
 * Reverse: reverse the sample/selected zone.
+* Polarity: invert the polarity of the sample/selected zone (both channels, or only L/R on stereo samples).
 * Filter: A high pass filter to remove low frequencies/DC offset and a band filter to enhance high frequencies.
 * Amplitude: Modify the amplitude of the sample.
 

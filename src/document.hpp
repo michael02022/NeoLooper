@@ -87,6 +87,12 @@ public:
     // sample by sample. Duration doesn't change, so loop start/end stay
     // exactly where they were.
     void reverse();
+    // Inverts the polarity (multiplies by -1) of the selection, or the whole
+    // sample if there's no selection (same criterion as reverse()).
+    // channel = -1: every channel (the only channel of a mono sample, both
+    // of a stereo one); 0/1: only L/R. Duration doesn't change, loop
+    // start/end stay intact. No-op if the requested channel doesn't exist.
+    void invertPolarity(int channel = -1);
     // Applies a high-pass + bell band (see procmods/filter.hpp) to the
     // selection, or to the whole sample if there's no selection -- time
     // domain filtering (biquads), without changing duration (loop start/end

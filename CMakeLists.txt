@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(NeoLooper VERSION 1.0.0 LANGUAGES C CXX)
+project(NeoLooper VERSION 1.0.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -268,6 +268,8 @@ add_library(neolooper MODULE
   src/loopmods/auto_loop_milselarch.cpp
   src/loopmods/loopauditioneer_finder.cpp
   src/loopmods/auto_loop_loopauditioneer.cpp
+  src/loopmods/semicycle_loop_finder.cpp
+  src/loopmods/auto_loop_semicycle.cpp
   src/procmods/filter.cpp
   src/procmods/filter_dsp.cpp
   src/procmods/amplitude.cpp
@@ -296,6 +298,8 @@ add_library(neolooper MODULE
   ${FONTAWESOME_DATA_CPP}
 )
 
+# Single source of truth for the version: project(... VERSION) above.
+target_compile_definitions(neolooper PRIVATE NEOLOOPER_VERSION="${PROJECT_VERSION}")
 target_include_directories(neolooper PRIVATE
   src
   third_party
@@ -383,6 +387,7 @@ add_executable(core_test
   src/loopmods/pingpong_harmonic_dsp.cpp
   src/loopmods/auto_loop_finder.cpp
   src/loopmods/loopauditioneer_finder.cpp
+  src/loopmods/semicycle_loop_finder.cpp
   src/procmods/filter_dsp.cpp
   src/procmods/amplitude_dsp.cpp
   src/procmods/pitch_dsp.cpp

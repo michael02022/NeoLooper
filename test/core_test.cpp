@@ -21,6 +21,7 @@
 #include "../src/loopmods/loopauditioneer_finder.hpp"
 #include "../src/loopmods/pingpong_harmonic_dsp.hpp"
 #include "../src/loopmods/rotation_loop_dsp.hpp"
+#include "../src/loopmods/semicycle_loop_finder.hpp"
 #include "../src/procmods/amplitude_dsp.hpp"
 #include "../src/procmods/filter_dsp.hpp"
 #include "../src/procmods/loris_dsp.hpp"
@@ -201,6 +202,43 @@ int main(int argc, char** argv) {
         CHECK(rdoc.loopStart() == 2 && rdoc.loopEnd() == 6,
               "Reverse: loop start/end quedan intactos (con seleccion)");
         CHECK(rdoc.frames() == 10, "Reverse: no cambia la duracion del sample");
+    }
+
+    // Document::invertPolarity(): -1 = todos los canales, 0/1 = solo L/R;
+    // seleccion (o todo, sin seleccion), sin mover loop start/end.
+    {
+        SharedParams iparams;
+        AudioDataPtr ipublished;
+        Document idoc(iparams, [&](AudioDataPtr d) { ipublished = std::move(d); });
+
+        auto is = std::make_shared<AudioData>();
+        is->sampleRate = 44100.0;
+        is->format = SampleFormat::Float32;
+        is->ch.resize(2);
+        is->ch[0] = {0.1f, 0.2f, 0.3f, 0.4f};
+        is->ch[1] = {-0.5f, 0.6f, -0.7f, 0.8f};
+        is->buildPeaks();
+        idoc.setAudio(is, "Polarity: setup");
+        idoc.setLoopPoints(1, 3, false);
+
+        idoc.invertPolarity(-1);
+        CHECK(idoc.data()->ch[0] == std::vector<float>({-0.1f, -0.2f, -0.3f, -0.4f}) &&
+                  idoc.data()->ch[1] == std::vector<float>({0.5f, -0.6f, 0.7f, -0.8f}),
+              "Polarity: Invert invierte ambos canales en estereo");
+        CHECK(idoc.loopStart() == 1 && idoc.loopEnd() == 3, "Polarity: loop intacto");
+        idoc.undo();
+
+        idoc.invertPolarity(0);
+        CHECK(idoc.data()->ch[0] == std::vector<float>({-0.1f, -0.2f, -0.3f, -0.4f}) &&
+                  idoc.data()->ch[1] == std::vector<float>({-0.5f, 0.6f, -0.7f, 0.8f}),
+              "Polarity: Invert (L) solo toca el canal izquierdo");
+        idoc.undo();
+
+        idoc.setSelection(1, 3);
+        idoc.invertPolarity(1);
+        CHECK(idoc.data()->ch[0] == std::vector<float>({0.1f, 0.2f, 0.3f, 0.4f}) &&
+                  idoc.data()->ch[1] == std::vector<float>({-0.5f, -0.6f, 0.7f, 0.8f}),
+              "Polarity: Invert (R) con seleccion solo toca ese tramo del canal derecho");
     }
 
     // Filtro (filterdsp): high-pass resonante en cascada + banda bell
@@ -3430,6 +3468,57 @@ int main(int argc, char** argv) {
         loopauditioneerdsp::Result r2 = loopauditioneerdsp::findLoops(*sig2, 0, (int64_t)v2.size(), p2);
         CHECK(r2.sustainStart >= 0 && r2.sustainEnd <= (int64_t)v2.size() && r2.sustainStart < r2.sustainEnd,
               "LoopAuditioneer: auto-sustain no crashea y reporta un rango valido");
+    }
+
+    // --- Semicycle match (semicycledsp) ---
+    {
+        const double sr = 44100.0;
+        const int64_t period = 100; // periodo entero -> senal exactamente periodica
+        auto makeSine = [&](int64_t frames, int chans, bool invertR) {
+            auto d = std::make_shared<AudioData>();
+            d->sampleRate = sr;
+            d->format = SampleFormat::Float32;
+            d->ch.assign((size_t)chans, std::vector<float>((size_t)frames));
+            for (int64_t i = 0; i < frames; ++i) {
+                float x = 0.5f * sinf(2.f * (float)M_PI * (float)(i % period) / (float)period + 0.3f);
+                d->ch[0][(size_t)i] = x;
+                if (chans > 1) d->ch[1][(size_t)i] = invertR ? -x : x;
+            }
+            d->buildPeaks();
+            return d;
+        };
+
+        auto mono = makeSine(22050, 1, false);
+        semicycledsp::Result rs = semicycledsp::findLoop(*mono, semicycledsp::shortDefaults());
+        CHECK(rs.ok && rs.end - rs.start == 4 * period && rs.error < 1e-9,
+              "Semicycle short: seno periodico -> loop de exactamente 4 ciclos con error 0");
+        CHECK(rs.ok && rs.end > rs.start && rs.end <= mono->frames() && rs.start >= 0,
+              "Semicycle short: puntos dentro del sample");
+
+        semicycledsp::Params cyc = semicycledsp::shortDefaults();
+        cyc.cycles = 7;
+        semicycledsp::Result rc = semicycledsp::findLoop(*mono, cyc);
+        CHECK(rc.ok && rc.end - rc.start == 7 * period, "Semicycle short: respeta el numero de ciclos");
+
+        auto shortSig = makeSine(4410, 2, false);
+        semicycledsp::Result rl = semicycledsp::findLoop(*shortSig, semicycledsp::longDefaults());
+        CHECK(rl.ok && (rl.end - rl.start) % period == 0 && rl.error < 1e-9,
+              "Semicycle long: seno periodico -> longitud multiplo del periodo con error 0");
+
+        semicycledsp::Params sel = semicycledsp::shortDefaults();
+        sel.useSelection = true;
+        sel.selStart = 5000;
+        sel.selEnd = 9000;
+        semicycledsp::Result rsel = semicycledsp::findLoop(*mono, sel);
+        CHECK(rsel.ok && rsel.end >= 5000 && rsel.end <= 9000,
+              "Semicycle short: con seleccion, el final cae dentro de la seleccion");
+
+        // L = -R: el canal central en dB con signo vale 0 exacto en todas
+        // partes, no hay cruces por cero -> sin resultado (y sin crash).
+        auto inverted = makeSine(4410, 2, true);
+        CHECK(!semicycledsp::findLoop(*inverted, semicycledsp::shortDefaults()).ok &&
+                  !semicycledsp::findLoop(*inverted, semicycledsp::longDefaults()).ok,
+              "Semicycle: estereo con L=-R no inventa semiciclos");
     }
 
     // --- Reduccion de bit-depth: escalar, no recortar (toggleBits) ---

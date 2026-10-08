@@ -10,6 +10,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include "imgui.h"
@@ -128,6 +130,110 @@ std::string uriToPath(const std::string& uri) {
         }
     }
     return out;
+}
+
+// System clipboard (CLIPBOARD selection) for ImGui's text fields. Without
+// this, ImGui falls back to a clipboard private to its own context, so
+// nothing could be pasted in from (or copied out to) other applications.
+// Copy: we take ownership of the selection and answer SelectionRequest
+// events from the event loop. Paste: ImGui's callback is synchronous, so we
+// ask the owner for the text and wait (briefly) for its SelectionNotify.
+struct X11Clipboard {
+    Display* dpy = nullptr;
+    Window win = 0;
+    Atom aClipboard = None, aUtf8 = None, aTargets = None, aText = None,
+         aProp = None, aIncr = None;
+    std::string owned;   // text we serve while we own the selection
+    std::string fetched; // last text received from another owner
+};
+
+Bool isClipboardNotify(Display*, XEvent* ev, XPointer arg) {
+    auto* cb = (X11Clipboard*)arg;
+    return ev->type == SelectionNotify && ev->xselection.requestor == cb->win &&
+           ev->xselection.selection == cb->aClipboard;
+}
+
+// Requests the CLIPBOARD as 'target' and waits up to ~250 ms for the reply.
+// Large transfers (INCR) aren't supported -- plenty for a file name.
+bool fetchClipboard(X11Clipboard* cb, Atom target) {
+    XDeleteProperty(cb->dpy, cb->win, cb->aProp);
+    XConvertSelection(cb->dpy, cb->aClipboard, target, cb->aProp, cb->win,
+                      CurrentTime);
+    XFlush(cb->dpy);
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(250);
+    XEvent ev;
+    while (!XCheckIfEvent(cb->dpy, &ev, isClipboardNotify, (XPointer)cb)) {
+        if (std::chrono::steady_clock::now() > deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (ev.xselection.property == None) return false; // conversion refused
+    Atom type;
+    int fmt;
+    unsigned long count, after;
+    unsigned char* data = nullptr;
+    bool ok = false;
+    if (XGetWindowProperty(cb->dpy, cb->win, cb->aProp, 0, 1 << 20, True,
+                           AnyPropertyType, &type, &fmt, &count, &after,
+                           &data) == Success && data) {
+        if (type != cb->aIncr && fmt == 8) {
+            cb->fetched.assign((char*)data, count);
+            ok = true;
+        }
+        XFree(data);
+    }
+    return ok;
+}
+
+const char* getClipboardText(ImGuiContext*) {
+    auto* cb = (X11Clipboard*)ImGui::GetPlatformIO().Platform_ClipboardUserData;
+    if (!cb) return nullptr;
+    Window owner = XGetSelectionOwner(cb->dpy, cb->aClipboard);
+    if (owner == cb->win) return cb->owned.c_str();
+    if (owner == None) return nullptr;
+    if (fetchClipboard(cb, cb->aUtf8) || fetchClipboard(cb, XA_STRING))
+        return cb->fetched.c_str();
+    return nullptr;
+}
+
+void setClipboardText(ImGuiContext*, const char* text) {
+    auto* cb = (X11Clipboard*)ImGui::GetPlatformIO().Platform_ClipboardUserData;
+    if (!cb) return;
+    cb->owned = text ? text : "";
+    XSetSelectionOwner(cb->dpy, cb->aClipboard, cb->win, CurrentTime);
+    XFlush(cb->dpy);
+}
+
+// Answers another application asking for the text we copied.
+void serveClipboardRequest(X11Clipboard& cb, const XSelectionRequestEvent& rq) {
+    XEvent reply{};
+    reply.xselection.type = SelectionNotify;
+    reply.xselection.display = rq.display;
+    reply.xselection.requestor = rq.requestor;
+    reply.xselection.selection = rq.selection;
+    reply.xselection.target = rq.target;
+    reply.xselection.time = rq.time;
+    reply.xselection.property = None; // = refused, unless filled in below
+    // Obsolete clients may pass property=None: use the target as property.
+    Atom prop = rq.property != None ? rq.property : rq.target;
+    if (rq.selection == cb.aClipboard) {
+        if (rq.target == cb.aTargets) {
+            Atom targets[] = {cb.aTargets, cb.aUtf8, XA_STRING, cb.aText};
+            XChangeProperty(cb.dpy, rq.requestor, prop, XA_ATOM, 32,
+                            PropModeReplace, (unsigned char*)targets, 4);
+            reply.xselection.property = prop;
+        } else if (rq.target == cb.aUtf8 || rq.target == XA_STRING ||
+                   rq.target == cb.aText) {
+            XChangeProperty(cb.dpy, rq.requestor, prop,
+                            rq.target == XA_STRING ? XA_STRING : cb.aUtf8, 8,
+                            PropModeReplace,
+                            (const unsigned char*)cb.owned.data(),
+                            (int)cb.owned.size());
+            reply.xselection.property = prop;
+        }
+    }
+    XSendEvent(cb.dpy, rq.requestor, False, NoEventMask, &reply);
+    XFlush(cb.dpy);
 }
 
 } // namespace
@@ -250,6 +356,22 @@ void GuiWindow::threadMain() {
     io.IniFilename = nullptr; // no imgui.ini in the DAW's CWD
     io.DisplaySize = ImVec2((float)w, (float)h);
     ImGui::StyleColorsDark();
+
+    X11Clipboard clipboard;
+    clipboard.dpy = dpy;
+    clipboard.win = win;
+    clipboard.aClipboard = XInternAtom(dpy, "CLIPBOARD", False);
+    clipboard.aUtf8 = XInternAtom(dpy, "UTF8_STRING", False);
+    clipboard.aTargets = XInternAtom(dpy, "TARGETS", False);
+    clipboard.aText = XInternAtom(dpy, "TEXT", False);
+    clipboard.aProp = XInternAtom(dpy, "NEOLOOPER_CLIPBOARD", False);
+    clipboard.aIncr = XInternAtom(dpy, "INCR", False);
+    {
+        ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+        pio.Platform_ClipboardUserData = &clipboard;
+        pio.Platform_GetClipboardTextFn = getClipboardText;
+        pio.Platform_SetClipboardTextFn = setClipboardText;
+    }
     ImGui::GetStyle().ScrollbarSize = 16.f;
 
     // Icon font (Font Awesome 4, embedded -- see
@@ -422,6 +544,13 @@ void GuiWindow::threadMain() {
                     }
                     break;
                 }
+                case SelectionRequest:
+                    serveClipboardRequest(clipboard, ev.xselectionrequest);
+                    break;
+                case SelectionClear:
+                    if (ev.xselectionclear.selection == clipboard.aClipboard)
+                        clipboard.owned.clear();
+                    break;
                 case SelectionNotify: {
                     if (ev.xselection.property != aDndProp) break;
                     Atom type;
@@ -496,6 +625,7 @@ void GuiWindow::threadMain() {
             std::this_thread::sleep_for(budget - spent);
     }
 
+    ImGui::GetPlatformIO().Platform_ClipboardUserData = nullptr;
     ImGui_ImplOpenGL2_Shutdown();
     ImGui::DestroyContext(ctx);
     glXMakeCurrent(dpy, None, nullptr);

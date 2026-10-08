@@ -400,6 +400,32 @@ void Document::reverse() {
     toast(selOnly ? "Selection reversed" : "Sample reversed");
 }
 
+void Document::invertPolarity(int channel) {
+    if (!hasAudio()) return;
+    if (channel >= cur_->channels()) return;
+    int64_t s0 = 0, s1 = frames();
+    bool selOnly = hasSelection();
+    if (selOnly) {
+        s0 = selStart();
+        s1 = selEnd();
+    }
+    if (s1 <= s0) return;
+    auto d = std::make_shared<AudioData>(*cur_);
+    for (int c = 0; c < d->channels(); ++c) {
+        if (channel >= 0 && c != channel) continue;
+        auto& v = d->ch[(size_t)c];
+        for (int64_t i = s0; i < s1; ++i) v[(size_t)i] = -v[(size_t)i];
+    }
+    // Duration doesn't change (same criterion as reverse()): loop start/end
+    // stay exactly where they were.
+    std::string op = channel == 0 ? "Invert polarity (L)"
+                   : channel == 1 ? "Invert polarity (R)"
+                                  : "Invert polarity";
+    if (selOnly) op += " (selection)";
+    commit(std::move(d), op.c_str());
+    toast(selOnly ? "Selection polarity inverted" : "Polarity inverted");
+}
+
 void Document::applyFilter(const filterdsp::FilterSpec& spec) {
     if (!hasAudio()) return;
     int64_t s0 = 0, s1 = frames();

@@ -26,6 +26,7 @@
 #include "../loopmods/pingpong_harmonic.hpp"
 #include "../loopmods/auto_loop_milselarch.hpp"
 #include "../loopmods/auto_loop_loopauditioneer.hpp"
+#include "../loopmods/auto_loop_semicycle.hpp"
 #include "../procmods/pitch_builtin.hpp"
 #include "../procmods/pitch_loris.hpp"
 #include "../procmods/pitch_signalsmith.hpp"
@@ -99,6 +100,7 @@ EditorUI::EditorUI(Document& doc, Engine& eng) : doc_(doc), eng_(eng) {
     // here as they're implemented (see loopmods/auto_loop_algorithm.hpp).
     autoLoopAlgos_.emplace_back(new AutoLoopMilselarch());
     autoLoopAlgos_.emplace_back(new AutoLoopLoopAuditioneer());
+    autoLoopAlgos_.emplace_back(new AutoLoopSemicycle());
 
     // Process > Pitch submenu: one entry per method.
     pitchMethods_.emplace_back(new PitchBuiltin());
@@ -415,6 +417,25 @@ void EditorUI::drawMenuBar() {
         ImGui::SetItemTooltip(
             "Reverses the selection; with no selection, reverses the whole "
             "sample. Loop start/end markers don't move.");
+        // Polarity: same windowless, undoable scheme as Reverse. The
+        // per-channel entries only make sense (and are only shown) for a
+        // stereo sample; a mono one just gets "Invert".
+        if (ImGui::BeginMenu("Polarity", doc_.hasAudio())) {
+            const bool stereo = doc_.data() && doc_.data()->channels() >= 2;
+            if (ImGui::MenuItem("Invert")) doc_.invertPolarity(-1);
+            ImGui::SetItemTooltip(stereo ? "Inverts the polarity of both channels."
+                                         : "Inverts the polarity of the sample.");
+            if (stereo) {
+                if (ImGui::MenuItem("Invert (L)")) doc_.invertPolarity(0);
+                ImGui::SetItemTooltip("Inverts the polarity of the left channel only.");
+                if (ImGui::MenuItem("Invert (R)")) doc_.invertPolarity(1);
+                ImGui::SetItemTooltip("Inverts the polarity of the right channel only.");
+            }
+            ImGui::Separator();
+            ImGui::TextDisabled(doc_.hasSelection() ? "Applies to the selection"
+                                                    : "Applies to the whole sample");
+            ImGui::EndMenu();
+        }
         // Filter: unlike Reverse it DOES have its own window (high-pass +
         // bell band, see over the real spectrum), but it's not a LoopModule
         // either -- it doesn't require a marked loop and its preview uses
