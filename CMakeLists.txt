@@ -224,7 +224,10 @@ if(WIN32)
   # sidesteps host-controlled search order entirely.
   set(WIN_DELAYLOAD_SRC src/win_delayload.cpp)
 else()
-  set(GUI_WINDOW_SRC src/gui/gui_window_x11.cpp)
+  set(GUI_WINDOW_SRC
+    src/gui/gui_window_x11.cpp
+    src/gui/imgui_soft_renderer.cpp # editor without OpenGL (remote X)
+  )
   set(WIN_DELAYLOAD_SRC)
 endif()
 

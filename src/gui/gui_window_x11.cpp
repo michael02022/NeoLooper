@@ -1,3 +1,6 @@
+// Linux implementation of gui_window.hpp: X11 + GLX, own GUI thread. Without
+// a usable OpenGL context (remote X sessions) the editor is drawn in
+// software instead (imgui_soft_renderer + XPutImage).
 #include "gui_window.hpp"
 
 #include <GL/gl.h>
@@ -7,9 +10,11 @@
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -19,6 +24,7 @@
 
 #include "IconsFontAwesome4.h"
 #include "fontawesome_data.hpp"
+#include "imgui_soft_renderer.hpp"
 
 // Thread-local ImGui context definition (see imconfig.h): each plugin
 // instance renders on its own thread with its own context.
@@ -26,22 +32,220 @@ thread_local ImGuiContext* g_sclImGuiTls = nullptr;
 
 namespace {
 
-// A plugin can't let Xlib's default handler kill the host over a transient
-// BadWindow (e.g. if the parent disappears before we do). Installed once for
-// the whole process.
-int swallowXError(Display*, XErrorEvent* e) {
-    fprintf(stderr, "[NeoLooper] X11 error ignored: code=%d\n",
-            (int)e->error_code);
-    return 0;
+// X errors on the plugin's own Display connections (one per editor, plus
+// the GLX probe) are counted and ignored: a plugin can't let Xlib's default
+// handler kill the host over a transient BadWindow (e.g. the parent going
+// away before we do). The handler is process-wide, so errors on any other
+// connection - the host's - go on to the handler that was there before.
+std::mutex g_xErrMutex;
+std::vector<std::pair<Display*, int>> g_ourDisplays; // display, error count
+XErrorHandler g_prevXErrorHandler = nullptr;
+
+int onXError(Display* d, XErrorEvent* e) {
+    {
+        std::lock_guard<std::mutex> lock(g_xErrMutex);
+        for (auto& [ours, count] : g_ourDisplays)
+            if (ours == d) {
+                if (count++ < 8)
+                    fprintf(stderr, "[NeoLooper] X11 error ignored: code=%d request=%d.%d\n",
+                            (int)e->error_code, (int)e->request_code, (int)e->minor_code);
+                return 0;
+            }
+    }
+    return g_prevXErrorHandler ? g_prevXErrorHandler(d, e) : 0;
 }
 
 void installErrorHandlerOnce() {
-    static bool done = false;
-    if (!done) {
-        done = true;
-        XSetErrorHandler(swallowXError);
-    }
+    static std::once_flag once;
+    std::call_once(once, [] { g_prevXErrorHandler = XSetErrorHandler(onXError); });
 }
+
+void registerDisplay(Display* d) {
+    std::lock_guard<std::mutex> lock(g_xErrMutex);
+    g_ourDisplays.emplace_back(d, 0);
+}
+
+void unregisterDisplay(Display* d) {
+    std::lock_guard<std::mutex> lock(g_xErrMutex);
+    g_ourDisplays.erase(std::remove_if(g_ourDisplays.begin(), g_ourDisplays.end(),
+                                       [d](const auto& e) { return e.first == d; }),
+                        g_ourDisplays.end());
+}
+
+int errorCount(Display* d) {
+    std::lock_guard<std::mutex> lock(g_xErrMutex);
+    for (const auto& [ours, count] : g_ourDisplays)
+        if (ours == d) return count;
+    return 0;
+}
+
+int kVisualAttrs[] = {GLX_RGBA, GLX_DOUBLEBUFFER, GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8,
+                      GLX_BLUE_SIZE, 8, GLX_DEPTH_SIZE, 0, None};
+
+// Can this X display give the editor an OpenGL context? Remote X sessions
+// (ssh -X, VNC, xrdp...) often can't: no GLX at all, or only indirect GLX,
+// which X.Org refuses by default since 1.20 (+iglx). The editor draws with
+// OpenGL only, so without one it must not open: drawing with no current
+// context crashes some drivers, and the host with them. Checked once.
+bool glxUsable(std::string& why) {
+    static std::once_flag once;
+    static bool usable = false;
+    static std::string reason;
+    std::call_once(once, [] {
+        installErrorHandlerOnce();
+        Display* dpy = XOpenDisplay(nullptr);
+        if (!dpy) {
+            reason = "could not open the X11 display";
+            return;
+        }
+        registerDisplay(dpy);
+        int errBase = 0, evBase = 0;
+        if (!glXQueryExtension(dpy, &errBase, &evBase)) {
+            reason = "the X server has no GLX (OpenGL) extension";
+        } else if (XVisualInfo* vi = glXChooseVisual(dpy, DefaultScreen(dpy), kVisualAttrs)) {
+            GLXContext ctx = glXCreateContext(dpy, vi, nullptr, True);
+            XSync(dpy, False);
+            if (!ctx) {
+                reason = "the X server refused an OpenGL context (indirect GLX only?)";
+            } else {
+                // Make it current on a small unmapped window: that's where
+                // an unusable context shows up.
+                const Window root = RootWindow(dpy, vi->screen);
+                XSetWindowAttributes swa{};
+                swa.colormap = XCreateColormap(dpy, root, vi->visual, AllocNone);
+                swa.border_pixel = 0;
+                Window w = XCreateWindow(dpy, root, 0, 0, 16, 16, 0, vi->depth, InputOutput,
+                                         vi->visual, CWColormap | CWBorderPixel, &swa);
+                const int before = errorCount(dpy);
+                usable = glXMakeCurrent(dpy, w, ctx) && glGetString(GL_VERSION) != nullptr;
+                XSync(dpy, False);
+                usable = usable && errorCount(dpy) == before;
+                if (!usable) reason = "the OpenGL context could not be used";
+                glXMakeCurrent(dpy, None, nullptr);
+                glXDestroyContext(dpy, ctx);
+                XDestroyWindow(dpy, w);
+                XFreeColormap(dpy, swa.colormap);
+            }
+            XFree(vi);
+        } else {
+            reason = "no suitable GLX visual (24-bit RGB, double buffered)";
+        }
+        XSync(dpy, False);
+        unregisterDisplay(dpy);
+        XCloseDisplay(dpy);
+    });
+    why = reason;
+    return usable;
+}
+
+// Software mode output: ImGui rendered into a 0x00RRGGBB framebuffer, and
+// only the rectangle that changed since the last frame sent to the window -
+// over a remote X link an idle editor costs nothing. Unused with OpenGL.
+class SoftPresenter {
+public:
+    SoftPresenter(Display* dpy, Window win, Visual* visual, int depth)
+        : dpy_(dpy), win_(win), visual_(visual), depth_(depth) {}
+    ~SoftPresenter() { release(); }
+
+    void invalidate() { full_ = true; } // e.g. Expose: resend everything
+
+    void present(ImDrawData* dd, int w, int h) {
+        if (w <= 0 || h <= 0) return;
+        if (w != w_ || h != h_) resize(w, h);
+        if (!img_) return;
+        ImGui_SoftRenderer_RenderDrawData(dd, frame_.data(), w, h, kClearRgb);
+
+        int x0 = 0, y0 = 0, x1 = w, y1 = h;
+        if (!full_) { // bounding box of the pixels that changed
+            x0 = w, y0 = h, x1 = -1, y1 = -1;
+            for (int y = 0; y < h; ++y) {
+                const uint32_t* a = &frame_[(size_t)y * w];
+                const uint32_t* b = &shown_[(size_t)y * w];
+                if (memcmp(a, b, (size_t)w * 4) == 0) continue;
+                int l = 0, r = w - 1;
+                while (a[l] == b[l]) ++l;
+                while (a[r] == b[r]) --r;
+                x0 = std::min(x0, l), x1 = std::max(x1, r + 1);
+                y0 = std::min(y0, y), y1 = y + 1;
+            }
+            if (y1 < 0) return; // nothing changed
+        }
+        full_ = false;
+        for (int y = y0; y < y1; ++y) {
+            memcpy(&shown_[(size_t)y * w + x0], &frame_[(size_t)y * w + x0], size_t(x1 - x0) * 4);
+            if (!direct_)
+                for (int x = x0; x < x1; ++x) XPutPixel(img_, x, y, toPixel(shown_[(size_t)y * w + x]));
+        }
+        XPutImage(dpy_, win_, gc_, img_, x0, y0, x0, y0, unsigned(x1 - x0), unsigned(y1 - y0));
+        XFlush(dpy_);
+    }
+
+    void release() {
+        if (img_) {
+            img_->data = nullptr; // the buffers are ours
+            XDestroyImage(img_);
+            img_ = nullptr;
+        }
+        if (gc_) {
+            XFreeGC(dpy_, gc_);
+            gc_ = nullptr;
+        }
+    }
+
+private:
+    static constexpr uint32_t kClearRgb = 0x17171A; // = the GL clear color (0.09, 0.09, 0.10)
+
+    void resize(int w, int h) {
+        if (img_) {
+            img_->data = nullptr;
+            XDestroyImage(img_);
+        }
+        w_ = w, h_ = h;
+        frame_.assign((size_t)w * h, 0);
+        shown_.assign((size_t)w * h, 0);
+        full_ = true;
+        if (!gc_) gc_ = XCreateGC(dpy_, win_, 0, nullptr);
+        img_ = XCreateImage(dpy_, visual_, depth_, ZPixmap, 0, nullptr, w, h, 32, 0);
+        if (!img_) return;
+        const uint16_t one = 1;
+        const bool hostLsb = *(const uint8_t*)&one == 1;
+        // The usual 32-bit 0x00RRGGBB layout: send our buffer as it is.
+        direct_ = img_->bits_per_pixel == 32 && img_->bytes_per_line == w * 4 &&
+                  img_->red_mask == 0xFF0000 && img_->green_mask == 0xFF00 &&
+                  img_->blue_mask == 0xFF && (img_->byte_order == LSBFirst) == hostLsb;
+        if (direct_) {
+            img_->data = (char*)shown_.data();
+        } else {
+            converted_.assign((size_t)img_->bytes_per_line * h, 0);
+            img_->data = converted_.data();
+        }
+    }
+
+    // 0x00RRGGBB -> the visual's pixel value (any channel masks).
+    unsigned long toPixel(uint32_t rgb) const {
+        auto channel = [](uint32_t v8, unsigned long mask) -> unsigned long {
+            if (!mask) return 0;
+            int shift = 0, bits = 0;
+            while (!((mask >> shift) & 1)) ++shift;
+            while ((mask >> (shift + bits)) & 1) ++bits;
+            const unsigned long v = bits >= 8 ? (unsigned long)v8 << (bits - 8) : v8 >> (8 - bits);
+            return (v << shift) & mask;
+        };
+        return channel((rgb >> 16) & 0xFF, img_->red_mask) | channel((rgb >> 8) & 0xFF, img_->green_mask) |
+               channel(rgb & 0xFF, img_->blue_mask);
+    }
+
+    Display* dpy_;
+    Window win_;
+    Visual* visual_;
+    int depth_;
+    GC gc_ = nullptr;
+    XImage* img_ = nullptr;
+    int w_ = 0, h_ = 0;
+    bool full_ = true, direct_ = false;
+    std::vector<uint32_t> frame_, shown_;
+    std::vector<char> converted_;
+};
 
 ImGuiKey keysymToImGuiKey(KeySym k) {
     switch (k) {
@@ -246,6 +450,17 @@ GuiWindow::~GuiWindow() { destroy(); }
 
 bool GuiWindow::create(uint32_t w, uint32_t h) {
     if (running_.load()) return true;
+    std::string why;
+    const char* forceSoft = getenv("NEOLOOPER_SOFTWARE_RENDER");
+    if (forceSoft && *forceSoft && strcmp(forceSoft, "0") != 0) {
+        soft_ = true;
+        fprintf(stderr, "[NeoLooper] drawing the editor in software "
+                        "(NEOLOOPER_SOFTWARE_RENDER)\n");
+    } else if (!glxUsable(why)) {
+        soft_ = true;
+        fprintf(stderr, "[NeoLooper] no OpenGL for the editor (%s): drawing it in software\n",
+                why.c_str());
+    }
     if (w > 0 && h > 0) {
         width_.store(w);
         height_.store(h);
@@ -288,17 +503,24 @@ void GuiWindow::threadMain() {
         fprintf(stderr, "[NeoLooper] could not open the X11 display\n");
         return;
     }
+    registerDisplay(dpy);
     const int screen = DefaultScreen(dpy);
 
-    int visAttrs[] = {GLX_RGBA, GLX_DOUBLEBUFFER, GLX_RED_SIZE, 8,
-                      GLX_GREEN_SIZE, 8, GLX_BLUE_SIZE, 8, GLX_DEPTH_SIZE, 0,
-                      None};
-    XVisualInfo* vi = glXChooseVisual(dpy, screen, visAttrs);
+    const bool soft = soft_;
+    XVisualInfo softVisual{};
+    XVisualInfo* vi = soft ? (XMatchVisualInfo(dpy, screen, 24, TrueColor, &softVisual) ? &softVisual
+                                                                                         : nullptr)
+                           : glXChooseVisual(dpy, screen, kVisualAttrs);
     if (!vi) {
-        fprintf(stderr, "[NeoLooper] no GLX visual available\n");
+        fprintf(stderr, soft ? "[NeoLooper] no 24-bit TrueColor visual for the editor\n"
+                             : "[NeoLooper] no GLX visual available\n");
+        unregisterDisplay(dpy);
         XCloseDisplay(dpy);
         return;
     }
+    auto freeVisual = [&] {
+        if (!soft) XFree(vi);
+    };
 
     Colormap cmap =
         XCreateColormap(dpy, RootWindow(dpy, screen), vi->visual, AllocNone);
@@ -340,14 +562,28 @@ void GuiWindow::threadMain() {
     Window dndSource = 0;
     bool dndUriOk = false;
 
-    GLXContext glc = glXCreateContext(dpy, vi, nullptr, GL_TRUE);
-    glXMakeCurrent(dpy, win, glc);
-
-    // no vsync: our own clock sets the pace (the swap must not block)
-    using SwapIntervalFn = void (*)(Display*, GLXDrawable, int);
-    if (auto f = (SwapIntervalFn)glXGetProcAddressARB(
-            (const GLubyte*)"glXSwapIntervalEXT"))
-        f(dpy, win, 0);
+    GLXContext glc = nullptr;
+    if (!soft) {
+        glc = glXCreateContext(dpy, vi, nullptr, GL_TRUE);
+        if (!glc || !glXMakeCurrent(dpy, win, glc)) {
+            // glxUsable() said yes, but never draw without a current context.
+            fprintf(stderr, "[NeoLooper] no usable OpenGL context: the editor stays empty\n");
+            if (glc) glXDestroyContext(dpy, glc);
+            XDestroyWindow(dpy, win);
+            XFreeColormap(dpy, cmap);
+            freeVisual();
+            XSync(dpy, False);
+            unregisterDisplay(dpy);
+            XCloseDisplay(dpy);
+            return;
+        }
+        // no vsync: our own clock sets the pace (the swap must not block)
+        using SwapIntervalFn = void (*)(Display*, GLXDrawable, int);
+        if (auto f = (SwapIntervalFn)glXGetProcAddressARB(
+                (const GLubyte*)"glXSwapIntervalEXT"))
+            f(dpy, win, 0);
+    }
+    SoftPresenter presenter(dpy, win, vi->visual, vi->depth);
 
     IMGUI_CHECKVERSION();
     ImGuiContext* ctx = ImGui::CreateContext();
@@ -394,7 +630,8 @@ void GuiWindow::threadMain() {
                                        &iconCfg, iconRanges);
     }
 
-    ImGui_ImplOpenGL2_Init();
+    if (soft) ImGui_SoftRenderer_Init();
+    else ImGui_ImplOpenGL2_Init();
 
     bool mapped = false;
     auto lastFrame = std::chrono::steady_clock::now();
@@ -428,6 +665,9 @@ void GuiWindow::threadMain() {
             XEvent ev;
             XNextEvent(dpy, &ev);
             switch (ev.type) {
+                case Expose:
+                    presenter.invalidate();
+                    break;
                 case ConfigureNotify:
                     width_.store((uint32_t)ev.xconfigure.width);
                     height_.store((uint32_t)ev.xconfigure.height);
@@ -606,32 +846,45 @@ void GuiWindow::threadMain() {
         lastFrame = now;
         io.DeltaTime = dt > 0.f ? dt : 1.f / 60.f;
 
-        ImGui_ImplOpenGL2_NewFrame();
+        if (!soft) ImGui_ImplOpenGL2_NewFrame();
         ImGui::NewFrame();
         if (drawUI_) drawUI_();
         ImGui::Render();
 
-        glViewport(0, 0, (int)width_.load(), (int)height_.load());
-        glClearColor(0.09f, 0.09f, 0.10f, 1.f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
-        glXSwapBuffers(dpy, win);
+        if (soft) {
+            presenter.present(ImGui::GetDrawData(), (int)io.DisplaySize.x, (int)io.DisplaySize.y);
+        } else {
+            glViewport(0, 0, (int)width_.load(), (int)height_.load());
+            glClearColor(0.09f, 0.09f, 0.10f, 1.f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
+            glXSwapBuffers(dpy, win);
+        }
 
-        // ~60 fps
+        // ~60 fps (30 in software: CPU drawing, and possibly a network link)
         auto frameEnd = std::chrono::steady_clock::now();
         auto spent = frameEnd - now;
-        auto budget = std::chrono::microseconds(16600);
+        auto budget = std::chrono::microseconds(soft ? 33300 : 16600);
         if (spent < budget)
             std::this_thread::sleep_for(budget - spent);
     }
 
     ImGui::GetPlatformIO().Platform_ClipboardUserData = nullptr;
-    ImGui_ImplOpenGL2_Shutdown();
+    if (soft) {
+        ImGui_SoftRenderer_Shutdown();
+    } else {
+        ImGui_ImplOpenGL2_Shutdown();
+    }
     ImGui::DestroyContext(ctx);
-    glXMakeCurrent(dpy, None, nullptr);
-    glXDestroyContext(dpy, glc);
+    if (glc) {
+        glXMakeCurrent(dpy, None, nullptr);
+        glXDestroyContext(dpy, glc);
+    }
+    presenter.release();
     XDestroyWindow(dpy, win);
     XFreeColormap(dpy, cmap);
-    XFree(vi);
+    freeVisual();
+    XSync(dpy, False); // errors of this connection still count as ours
+    unregisterDisplay(dpy);
     XCloseDisplay(dpy);
 }

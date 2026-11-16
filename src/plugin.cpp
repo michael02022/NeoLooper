@@ -219,7 +219,11 @@ bool guiCreate(const clap_plugin_t* plugin, const char* api, bool is_floating) {
             std::lock_guard<std::recursive_mutex> l(p->docMutex);
             p->ui->openPath(path);
         });
-    return p->window->create(kDefaultW, kDefaultH);
+    if (!p->window->create(kDefaultW, kDefaultH)) {
+        p->window.reset();
+        return false;
+    }
+    return true;
 }
 
 void guiDestroy(const clap_plugin_t* plugin) {

@@ -41,6 +41,9 @@ private:
 
     std::thread thread_;
     std::atomic<bool> quit_{false};
+    // Linux: draw with imgui_soft_renderer + XPutImage instead of OpenGL
+    // (no usable GLX on this display, or NEOLOOPER_SOFTWARE_RENDER=1).
+    bool soft_ = false;
     std::atomic<bool> running_{false};
     std::atomic<uint32_t> width_{1150}, height_{720};
 
