@@ -33,6 +33,7 @@ Document::Document(SharedParams& params, std::function<void(AudioDataPtr)> publi
 
 Document::Snapshot Document::makeSnapshot(const char* op) const {
     return Snapshot{cur_, params_.loopStart.load(), params_.loopEnd.load(),
+                    params_.selStart.load(), params_.selEnd.load(),
                     params_.rootNote.load(), params_.tuneCents.load(),
                     env, sampleName_, op ? op : ""};
 }
@@ -45,7 +46,9 @@ void Document::restoreSnapshot(const Snapshot& s) {
     params_.tuneCents.store(s.tuneCents);
     env = s.env;
     sampleName_ = s.sampleName;
-    clearSelection();
+    // After cur_ is restored: setSelection() clamps to its length (and
+    // clears it for -1/-1).
+    setSelection(s.selStart, s.selEnd);
     publish_(cur_);
 }
 

@@ -67,6 +67,18 @@ std::string formatTime(double frames, double sr) {
     return buf;
 }
 
+// "512 bytes" / "12.3 KiB" / "4.56 MiB" (binary units, 1 KiB = 1024 bytes).
+std::string formatBytes(int64_t bytes) {
+    char buf[32];
+    if (bytes < 1024)
+        snprintf(buf, sizeof(buf), "%lld bytes", (long long)bytes);
+    else if (bytes < 1024 * 1024)
+        snprintf(buf, sizeof(buf), "%.1f KiB", (double)bytes / 1024.0);
+    else
+        snprintf(buf, sizeof(buf), "%.2f MiB", (double)bytes / (1024.0 * 1024.0));
+    return buf;
+}
+
 bool toolbarButton(const char* label, bool enabled, bool lit = false,
                    float width = 0.f) {
     if (!enabled) ImGui::BeginDisabled();
@@ -694,6 +706,30 @@ void EditorUI::drawToolbar() {
         ImGui::TextColored(ImVec4(0.94f, 0.71f, 0.24f, 1.f), "Processing: %s",
                            m->name());
         break;
+    }
+
+    // --- sample size --- right-aligned at the end of this row: the audio
+    // data at its current bit depth (frames x channels x 2 or 4 bytes), i.e.
+    // what the sample weighs in RAM / as raw PCM, before any file header.
+    {
+        const AudioDataPtr d = doc_.data();
+        const bool hasAudio = doc_.hasAudio() && d;
+        const int bytesPerSample = (hasAudio && d->format == SampleFormat::Int16) ? 2 : 4;
+        const int64_t bytes =
+            hasAudio ? doc_.frames() * (int64_t)d->channels() * bytesPerSample : 0;
+        char label[64];
+        snprintf(label, sizeof(label), "Size: %s", formatBytes(bytes).c_str());
+        ImGui::SameLine(0, 24);
+        const float w = ImGui::CalcTextSize(label).x;
+        const float avail = ImGui::GetContentRegionAvail().x;
+        if (avail > w) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - w);
+        if (hasAudio)
+            ImGui::TextUnformatted(label);
+        else
+            ImGui::TextDisabled("%s", label);
+        if (hasAudio)
+            ImGui::SetItemTooltip("%lld bytes\nAudio data only - no header included in size number",
+                                  (long long)bytes);
     }
 
     // sample rate popup

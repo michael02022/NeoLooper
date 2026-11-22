@@ -165,6 +165,44 @@ int main(int argc, char** argv) {
         CHECK(!pdoc.env.anyActive(), "Pitch env: amp+pitch combinados tambien se reinician tras aplicar");
     }
 
+    // Deshacer un proceso de Loop (replaceRange, lo que hace Apply) devuelve
+    // la seleccion que habia antes de aplicarlo; rehacer, la de despues.
+    {
+        SharedParams uparams;
+        AudioDataPtr upublished;
+        Document udoc(uparams, [&](AudioDataPtr d) { upublished = std::move(d); });
+        auto us = std::make_shared<AudioData>();
+        us->sampleRate = 44100.0;
+        us->format = SampleFormat::Float32;
+        us->ch.assign(1, std::vector<float>(1000, 0.25f));
+        us->buildPeaks();
+        udoc.setAudio(us, "Undo sel: setup");
+
+        udoc.setSelection(200, 600);
+        udoc.setLoopPoints(200, 600, false);
+        std::vector<std::vector<float>> piece(1, std::vector<float>(300, 0.5f));
+        udoc.replaceRange(200, 600, std::move(piece), 200, 500, "Loop op");
+        CHECK(!udoc.hasSelection() && udoc.frames() == 900,
+              "Undo sel: aplicar el proceso de loop limpia la seleccion");
+
+        udoc.undo();
+        CHECK(udoc.hasSelection() && udoc.selStart() == 200 && udoc.selEnd() == 600,
+              "Undo sel: deshacer restaura la seleccion previa al proceso");
+        CHECK(udoc.frames() == 1000 && udoc.loopStart() == 200 && udoc.loopEnd() == 600,
+              "Undo sel: deshacer restaura audio y loop");
+
+        udoc.redo();
+        CHECK(!udoc.hasSelection() && udoc.frames() == 900,
+              "Undo sel: rehacer vuelve al estado tras aplicar (sin seleccion)");
+
+        // Cortar: deshacer devuelve tambien la zona que se corto.
+        udoc.setSelection(100, 300);
+        udoc.cutSelection();
+        udoc.undo();
+        CHECK(udoc.selStart() == 100 && udoc.selEnd() == 300,
+              "Undo sel: deshacer un corte restaura la zona cortada como seleccion");
+    }
+
     // Document::reverse(): invierte seleccion (o todo, sin seleccion), sin
     // mover loop start/end (la duracion no cambia). Aislado en su propio
     // Document, mismo motivo que el bloque de Pitch env de arriba.

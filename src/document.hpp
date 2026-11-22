@@ -198,6 +198,9 @@ private:
     struct Snapshot {
         AudioDataPtr data;
         int64_t loopStart, loopEnd;
+        // Selection when the snapshot was taken (-1/-1 = none): undoing an
+        // operation brings back the region it was applied to.
+        int64_t selStart, selEnd;
         int rootNote;
         float tuneCents;
         Envelopes env;

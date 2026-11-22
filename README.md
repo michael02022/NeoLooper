@@ -102,9 +102,10 @@ cmake --build build
 cp build/NeoLooper.clap ~/.clap/
 ```
 
-The editor draws with OpenGL (GLX). Where the X display can't provide a
-usable OpenGL context - typically remote X sessions (ssh -X, VNC, xrdp,
-X2Go), where X.Org refuses indirect GLX - it is drawn in software instead
+The editor draws with OpenGL (GLX) when it gets a direct (local) OpenGL
+context. Otherwise - typically remote X sessions (ssh -X, VNC, xrdp, X2Go,
+VcXsrv/Xming), which offer no GLX or only indirect GLX, and whenever
+`LIBGL_ALWAYS_INDIRECT` is set - it is drawn in software instead
 (`src/gui/imgui_soft_renderer.cpp`, sent with `XPutImage`, only the part
 that changed, at up to 30 fps); the reason is printed on stderr.
 `NEOLOOPER_SOFTWARE_RENDER=1` in the DAW's environment forces it.

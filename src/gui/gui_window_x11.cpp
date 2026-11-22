@@ -82,16 +82,24 @@ int errorCount(Display* d) {
 int kVisualAttrs[] = {GLX_RGBA, GLX_DOUBLEBUFFER, GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8,
                       GLX_BLUE_SIZE, 8, GLX_DEPTH_SIZE, 0, None};
 
-// Can this X display give the editor an OpenGL context? Remote X sessions
-// (ssh -X, VNC, xrdp...) often can't: no GLX at all, or only indirect GLX,
-// which X.Org refuses by default since 1.20 (+iglx). The editor draws with
-// OpenGL only, so without one it must not open: drawing with no current
-// context crashes some drivers, and the host with them. Checked once.
+// Can this X display give the editor a direct (local) OpenGL context?
+// Remote X sessions (ssh -X, VNC, xrdp, VcXsrv...) can't: no GLX at all, or
+// only indirect GLX. X.Org refuses that by default since 1.20 (+iglx); where
+// it is accepted (VcXsrv, LIBGL_ALWAYS_INDIRECT=1) it is slow and fragile -
+// BadWindow errors, even crashed X servers. So anything but a direct context
+// means software drawing: drawing with no usable context crashes some
+// drivers, and the host with them. Checked once.
 bool glxUsable(std::string& why) {
     static std::once_flag once;
     static bool usable = false;
     static std::string reason;
     std::call_once(once, [] {
+        const char* indirect = getenv("LIBGL_ALWAYS_INDIRECT");
+        if (indirect && *indirect && strcmp(indirect, "0") != 0) {
+            // Don't even ask: indirect GLX requests alone can upset the server.
+            reason = "LIBGL_ALWAYS_INDIRECT is set: indirect OpenGL only";
+            return;
+        }
         installErrorHandlerOnce();
         Display* dpy = XOpenDisplay(nullptr);
         if (!dpy) {
@@ -107,6 +115,9 @@ bool glxUsable(std::string& why) {
             XSync(dpy, False);
             if (!ctx) {
                 reason = "the X server refused an OpenGL context (indirect GLX only?)";
+            } else if (!glXIsDirect(dpy, ctx)) {
+                reason = "only indirect OpenGL (remote display)";
+                glXDestroyContext(dpy, ctx);
             } else {
                 // Make it current on a small unmapped window: that's where
                 // an unusable context shows up.
