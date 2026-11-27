@@ -4,3 +4,6 @@ Particular Programs Ltd: https://breakfastquay.com/rubberband/
 SignalSmith: https://signalsmith-audio.co.uk/code/stretch/
 peastman (Granular method of looping): https://vi-control.net/community/threads/extending-very-short-samples.153986/ 
 Kelly Fitz and Lippold Haken (Loris): https://github.com/kellyfitz/loris
+Nicolas Fernandez (Snaptune, Autotune): https://github.com/NicoFerni/snaptune
+Kevin Kopczynski (M/S Exciter, Process > Exciter): https://github.com/KevinToodlepoot/MS-Exciter
+free-audio (clap-wrapper: VST3 and standalone versions): https://github.com/free-audio/clap-wrapper

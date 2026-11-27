@@ -42,9 +42,8 @@ struct CoreResult {
 // with no rotation search or blending. false if there isn't enough audio
 // around anchorSample for the chosen fft-size.
 //
-// lockPeriod > 0 (PhaseVocoder only; Freeze's "exact cycle" mode, Infinity's
-// Freeze Looper style): instead of the full loop's grid (multiples of
-// sr/nLoopSamples), each bin is quantized to the HARMONIC SERIES of a period
+// lockPeriod > 0 (PhaseVocoder only; Freeze's "exact cycle" mode): instead
+// of the full loop's grid (multiples of sr/nLoopSamples), each bin is quantized to the HARMONIC SERIES of a period
 // of lockPeriod samples (multiples of sr/lockPeriod) -- all the energy ends
 // up on exact harmonics of that fundamental, and the synthesized signal is
 // periodic at lockPeriod (every cycle identical), not just over the whole

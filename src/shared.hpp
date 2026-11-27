@@ -9,6 +9,15 @@
 
 #include "audio_data.hpp"
 
+// How the engine reads between samples when the playback ratio isn't 1.
+enum class PlaybackInterp {
+    None = 0,   // drop-sample: the previous sample is held (old hardware samplers)
+    Linear = 1, // 2-point linear
+    Cubic = 2,  // 4-point cubic Hermite spline (Catmull-Rom)
+    Sinc16 = 3, // 16-tap windowed sinc (default)
+};
+constexpr int kPlaybackInterpCount = 4;
+
 // "Live" parameters: the audio thread reads them per block, the GUI writes
 // them. That way loop/selection/tune changes are heard instantly.
 struct SharedParams {
@@ -25,6 +34,15 @@ struct SharedParams {
     // pitch moves with speed, same as scrubbing tape. Never touches the
     // document, only how fast the playhead advances (see Engine::process).
     std::atomic<float>  playbackSpeed{1.f};
+    // Playback interpolation (PlaybackInterp), auditioning only -- never
+    // touches the document or any offline processing.
+    std::atomic<int>    playbackInterp{(int)PlaybackInterp::Sinc16};
+    // Piano preview envelope (see key_envelope.hpp): applied only to notes
+    // triggered from the on-screen piano, never to Play or the document.
+    std::atomic<bool>  keyEnvEnabled{false};
+    std::atomic<int>   keyEnvCurve{0};        // keyenv::Curve
+    std::atomic<float> keyEnvHoldMs{0.f};
+    std::atomic<float> keyEnvDecayMs{1000.f};
 };
 
 // Publishing immutable snapshots to the audio thread. The GUI does set()

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 
 #include "imgui.h"
 
@@ -10,6 +11,7 @@
 
 #include "../aiff_io.hpp"
 #include "../fft.hpp"
+#include "../key_envelope.hpp"
 #include "../flac_io.hpp"
 #include "../ogg_io.hpp"
 #include "../wav_io.hpp"
@@ -24,6 +26,7 @@
 #include "../loopmods/rotation_loop.hpp"
 #include "../loopmods/granular_loop.hpp"
 #include "../loopmods/pingpong_harmonic.hpp"
+#include "../loopmods/alt_loopers.hpp"
 #include "../loopmods/auto_loop_milselarch.hpp"
 #include "../loopmods/auto_loop_loopauditioneer.hpp"
 #include "../loopmods/auto_loop_semicycle.hpp"
@@ -107,6 +110,9 @@ EditorUI::EditorUI(Document& doc, Engine& eng) : doc_(doc), eng_(eng) {
     modules_.emplace_back(new FreezeStretch());
     modules_.emplace_back(new RotationLoop());
     modules_.emplace_back(new GranularLoop());
+    modules_.emplace_back(new EnsembleLoop());
+    modules_.emplace_back(new EnsembleLoop(/*oneBand=*/true));
+    modules_.emplace_back(new RandomPhaseLoop());
 
     // Auto Loop's algorithm menu: one entry per author. Add new methods
     // here as they're implemented (see loopmods/auto_loop_algorithm.hpp).
@@ -142,6 +148,8 @@ void EditorUI::openPath(const std::string& path) {
     // The filter too: if left open it would keep operating (and sounding in
     // preview) on the snapshot of the PREVIOUS sample.
     filter_.close(eng_);
+    autotune_.close(eng_);
+    exciter_.close(eng_);
     doc_.setAudio(r.data, "Open file");
     doc_.setSampleName(baseNameNoExt(path));
     doc_.clearLoopPoints(false);
@@ -157,6 +165,8 @@ void EditorUI::openPath(const std::string& path) {
     }
     doc_.env.clearAll();
     eng_.seek(0);
+    importDir_ = std::filesystem::path(path).parent_path().string();
+    exportDirPending_ = true;
     size_t base = path.find_last_of('/');
     pushToast("Loaded: " + (base == std::string::npos
                                 ? path : path.substr(base + 1)));
@@ -177,11 +187,20 @@ void EditorUI::toggleRecord() {
     }
 }
 
+void EditorUI::openExportDialog(const char* title, std::vector<std::string> exts,
+                                const std::string& name) {
+    fileDlg_.open(FileDialog::SaveFile, title, std::move(exts), name);
+    if (exportDirPending_) {
+        fileDlg_.setDirectory(importDir_);
+        exportDirPending_ = false;
+    }
+}
+
 void EditorUI::exportRequested() {
     if (!doc_.hasAudio()) return;
     fileDlgPurpose_ = 1;
     std::string base = doc_.sampleName().empty() ? "loop" : doc_.sampleName();
-    fileDlg_.open(FileDialog::SaveFile, "Export WAV", {".wav"}, base + ".wav");
+    openExportDialog("Export WAV", {".wav"}, base + ".wav");
     fileDlg_.addCombo("Depth", {"16-bit PCM", "24-bit PCM", "32-bit float"}, exportBitsIdx_);
     fileDlg_.addCombo("Loop type", {"Forward", "Alternating (ping-pong)"}, exportWavLoopTypeIdx_);
     fileDlg_.setCheckbox("Export markers (cues)", exportCuesEnabled_);
@@ -191,7 +210,7 @@ void EditorUI::exportFlacRequested() {
     if (!doc_.hasAudio()) return;
     fileDlgPurpose_ = 2;
     std::string base = doc_.sampleName().empty() ? "loop" : doc_.sampleName();
-    fileDlg_.open(FileDialog::SaveFile, "Export FLAC", {".flac"}, base + ".flac");
+    openExportDialog("Export FLAC", {".flac"}, base + ".flac");
     fileDlg_.addCombo("Depth", {"16-bit PCM", "24-bit PCM"}, exportFlacBitsIdx_);
     fileDlg_.setCheckbox("Export markers (cues)", exportCuesEnabled_);
 }
@@ -200,7 +219,7 @@ void EditorUI::exportOggRequested() {
     if (!doc_.hasAudio()) return;
     fileDlgPurpose_ = 3;
     std::string base = doc_.sampleName().empty() ? "loop" : doc_.sampleName();
-    fileDlg_.open(FileDialog::SaveFile, "Export OGG", {".ogg"}, base + ".ogg");
+    openExportDialog("Export OGG", {".ogg"}, base + ".ogg");
     fileDlg_.addCombo("Loop tags", {"LOOPSTART / LOOPLENGTH", "LOOPSTART / LOOPEND"},
                       exportOggLoopTagIdx_);
     fileDlg_.setSlider("Quality", exportOggQuality_, 0.0f, 1.0f);
@@ -211,7 +230,7 @@ void EditorUI::exportAiffRequested() {
     if (!doc_.hasAudio()) return;
     fileDlgPurpose_ = 4;
     std::string base = doc_.sampleName().empty() ? "loop" : doc_.sampleName();
-    fileDlg_.open(FileDialog::SaveFile, "Export AIFF", {".aiff", ".aif"}, base + ".aiff");
+    openExportDialog("Export AIFF", {".aiff", ".aif"}, base + ".aiff");
     fileDlg_.addCombo("Depth", {"16-bit PCM", "24-bit PCM"}, exportAiffBitsIdx_);
     fileDlg_.addCombo("Markers", {"beg loop / end loop", "LpBeg / LpEnd"},
                       exportAiffLpNames_ ? 1 : 0);
@@ -291,7 +310,8 @@ void EditorUI::draw() {
     // height reserved for what goes below the waveform
     const float bottomH = ImGui::GetFrameHeightWithSpacing() /*info*/ +
                           ImGui::GetFrameHeightWithSpacing() /*tune*/ +
-                          96.f /*piano*/ + 16.f;
+                          96.f /*piano*/ +
+                          ImGui::GetFrameHeightWithSpacing() /*piano envelope*/ + 16.f;
     float waveH = std::max(140.f, ImGui::GetContentRegionAvail().y - bottomH);
 
     // With a loop module open, the waveform displays the document with the
@@ -320,6 +340,16 @@ void EditorUI::draw() {
         ovLs = doc_.loopStart();
         ovLe = doc_.loopEnd();
     }
+    if (!ov && autotune_.previewDoc()) {
+        ov = autotune_.previewDoc();
+        ovLs = doc_.loopStart();
+        ovLe = doc_.loopEnd();
+    }
+    if (!ov && exciter_.previewDoc()) {
+        ov = exciter_.previewDoc();
+        ovLs = doc_.loopStart();
+        ovLe = doc_.loopEnd();
+    }
     if (!ov && activePitchPreview()) {
         ov = activePitchPreview();
         ovLs = doc_.loopStart();
@@ -340,6 +370,8 @@ void EditorUI::draw() {
     for (auto& m : modules_) m->draw(doc_, eng_);
     filter_.draw(doc_, eng_);
     amplitude_.draw(doc_, eng_);
+    autotune_.draw(doc_, eng_);
+    exciter_.draw(doc_, eng_);
     for (auto& m : pitchMethods_) m->draw(doc_, eng_);
     for (auto& m : stretchMethods_) m->draw(doc_, eng_);
     drawDialogs();
@@ -369,6 +401,13 @@ void EditorUI::drawMenuBar() {
             exportFlacRequested();
         if (ImGui::MenuItem("Export OGG...", nullptr, false, doc_.hasAudio()))
             exportOggRequested();
+        // Only in the standalone (see setAudioSettingsAction): the audio
+        // device, channels, sample rate and buffer size.
+        if (audioSettings_) {
+            ImGui::Separator();
+            if (ImGui::MenuItem("Audio Settings...")) audioSettings_();
+            ImGui::SetItemTooltip("Audio API, input/output devices and channels, sample rate and buffer size");
+        }
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Edit")) {
@@ -513,6 +552,37 @@ void EditorUI::drawMenuBar() {
             }
             ImGui::EndMenu();
         }
+        // Autotune: Snaptune pitch correction (Studio mode), same
+        // non-LoopModule scheme as Filter/Amplitude.
+        if (ImGui::MenuItem("Autotune...", nullptr, autotune_.isOpen(),
+                            doc_.hasAudio() || autotune_.isOpen())) {
+            if (autotune_.isOpen()) {
+                autotune_.close(eng_);
+            } else {
+                int64_t s0 = 0, s1 = doc_.frames();
+                if (doc_.hasSelection()) { s0 = doc_.selStart(); s1 = doc_.selEnd(); }
+                autotune_.open(doc_.data(), s0, s1);
+            }
+        }
+        ImGui::SetItemTooltip(
+            "Pitch correction (Snaptune, Studio mode): snaps the pitch to the "
+            "nearest semitone or to the root note, with a live pitch graph. "
+            "Operates on the selection, or the whole sample with no selection.");
+        // Exciter: M/S Exciter, level-matched. Same non-LoopModule scheme as
+        // Filter/Amplitude.
+        if (ImGui::MenuItem("Exciter...", nullptr, exciter_.isOpen(), doc_.hasAudio() || exciter_.isOpen())) {
+            if (exciter_.isOpen()) {
+                exciter_.close(eng_);
+            } else {
+                int64_t s0 = 0, s1 = doc_.frames();
+                if (doc_.hasSelection()) { s0 = doc_.selStart(); s1 = doc_.selEnd(); }
+                exciter_.open(doc_.data(), s0, s1);
+            }
+        }
+        ImGui::SetItemTooltip(
+            "Adds harmonics/brightness (M/S Exciter: tube-like waveshaping above an "
+            "adjustable high-pass, plus Mid/Side width), level-matched so the volume "
+            "doesn't change. Operates on the selection, or the whole sample with no selection.");
         // Amplitude: the simplest processor here -- plain gain (dB) with a
         // Clip checkbox. Same non-LoopModule scheme as Filter/Pitch/
         // Stretch.
@@ -533,6 +603,12 @@ void EditorUI::drawMenuBar() {
             "the whole sample with no selection.");
         ImGui::EndMenu();
     }
+    // Version tag, right after Process (NEOLOOPER_VERSION comes from
+    // CMake's project(... VERSION)).
+#ifndef NEOLOOPER_VERSION
+#define NEOLOOPER_VERSION "dev"
+#endif
+    ImGui::TextDisabled("v" NEOLOOPER_VERSION);
     ImGui::EndMenuBar();
 }
 
@@ -596,8 +672,14 @@ void EditorUI::drawToolbar() {
         }
     }
     ImGui::SameLine();
-    if (toolbarButton("Mono", has && d && d->channels() > 1))
+    // Mono <-> Stereo: a stereo sample offers "Mono" (pick L, R or the mix);
+    // a mono one offers "Stereo" instead, which duplicates its channel into R.
+    if (has && d && d->channels() == 1) {
+        if (toolbarButton("Stereo", true)) doc_.toStereo();
+        ImGui::SetItemTooltip("Duplicates the mono channel into R, making the sample stereo.");
+    } else if (toolbarButton("Mono", has && d && d->channels() > 1)) {
         ImGui::OpenPopup("##monoPopup");
+    }
     if (ImGui::BeginPopup("##monoPopup")) {
         if (ImGui::MenuItem("Take L side")) doc_.toMono(0);
         if (ImGui::MenuItem("Take R side")) doc_.toMono(1);
@@ -621,7 +703,13 @@ void EditorUI::drawToolbar() {
     ImGui::SameLine();
     if (toolbarButton("Remove loop", doc_.hasLoop())) doc_.clearLoopPoints(true);
     ImGui::SameLine();
-    if (toolbarButton("Remove attack", doc_.hasLoop() && doc_.loopStart() > 0))
+    if (toolbarButton("Sel->Trim", sel && (doc_.selStart() > 0 || doc_.selEnd() < doc_.frames())))
+        doc_.trimToSelection();
+    ImGui::SetItemTooltip(
+        "Deletes everything outside the selection, keeping only the\n"
+        "selected audio (the loop moves with it). Undo restores it.");
+    ImGui::SameLine();
+    if (toolbarButton("Trim Atk", doc_.hasLoop() && doc_.loopStart() > 0))
         doc_.trimBeforeLoopStart();
     ImGui::SetItemTooltip(
         "Deletes all audio before the loop start\n"
@@ -696,6 +784,34 @@ void EditorUI::drawToolbar() {
         ImGui::SetItemTooltip(
             "Playback speed for auditioning -- doesn't modify the sample.\n"
             "Right-click to reset to 1x.");
+
+        // --- playback interpolation --- (auditioning only, like Speed)
+        static const char* kInterpNames[kPlaybackInterpCount] = {"None", "Linear", "Cubic Spline", "16 Sinc"};
+        static const char* kInterpTips[kPlaybackInterpCount] = {
+            "No interpolation (drop-sample): each sample is held until the next,\n"
+            "like old hardware samplers -- aliasing and grit when repitched.",
+            "2-point linear interpolation: cheap, dulls the highs a little\n"
+            "and lets some aliasing through.",
+            "4-point cubic spline (Catmull-Rom): smoother than linear, keeps\n"
+            "more highs; some aliasing remains. The classic tracker/sampler cubic.",
+            "16-tap windowed sinc (default): clean, near-transparent repitching.",
+        };
+        int interp = std::clamp(eng_.params.playbackInterp.load(), 0, kPlaybackInterpCount - 1);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(110);
+        if (ImGui::BeginCombo("##interp", kInterpNames[interp])) {
+            for (int i = 0; i < kPlaybackInterpCount; ++i) {
+                if (ImGui::Selectable(kInterpNames[i], i == interp))
+                    eng_.params.playbackInterp.store(i);
+                ImGui::SetItemTooltip("%s", kInterpTips[i]);
+                if (i == interp) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SetItemTooltip(
+            "Playback interpolation, heard whenever the sample is repitched\n"
+            "(piano, Tune, Speed, or a host rate different from the sample's).\n"
+            "Auditioning only -- doesn't modify the sample or the export.");
     }
 
     // Indicates whether a processing module is open (modules are now opened
@@ -942,10 +1058,13 @@ void EditorUI::drawInfoBar() {
     } else {
         ImGui::TextDisabled("No selection");
     }
-    ImGui::SameLine(0, 24);
-    if (doc_.hasLoop())
+    // SameLine only before something that follows it: a trailing SameLine
+    // (no loop, no audio) pulled the tune slider/piano up onto this line.
+    if (doc_.hasLoop()) {
+        ImGui::SameLine(0, 24);
         ImGui::Text("Loop: %lld .. %lld", (long long)doc_.loopStart(),
                     (long long)doc_.loopEnd());
+    }
     if (d) {
         ImGui::SameLine(0, 24);
         ImGui::TextDisabled("%s | %d channel%s | %s", formatName(d->format),
@@ -953,6 +1072,8 @@ void EditorUI::drawInfoBar() {
                             eng_.previewActive()      ? "LOOP PREVIEW"
                             : filter_.previewDoc()    ? "FILTER PREVIEW"
                             : amplitude_.previewDoc() ? "AMPLITUDE PREVIEW"
+                            : autotune_.previewDoc()  ? "AUTOTUNE PREVIEW"
+                            : exciter_.previewDoc()   ? "EXCITER PREVIEW"
                             : activePitchPreview()    ? "PITCH PREVIEW"
                             : activeStretchPreview()  ? "STRETCH PREVIEW"
                                                       : "");
@@ -1017,6 +1138,7 @@ void EditorUI::drawTuneAndScope() {
         doc_.setTuneCents((float)centsInt);
     if (ImGui::IsItemClicked(1)) doc_.setTuneCents(0); // right-click: reset
     drawPiano(leftW);
+    drawKeyEnvelope(leftW);
     ImGui::EndGroup();
 
     // oscilloscope <-> spectrum on the right (click to toggle)
@@ -1025,7 +1147,7 @@ void EditorUI::drawTuneAndScope() {
     {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 p0 = ImGui::GetCursorScreenPos();
-        float h = 96.f + ImGui::GetFrameHeightWithSpacing() - 4.f;
+        float h = 96.f + 2.f * ImGui::GetFrameHeightWithSpacing() - 4.f;
         ImVec2 p1 = ImVec2(p0.x + scopeW, p0.y + h);
 
         ImGui::InvisibleButton("##scope", ImVec2(scopeW, h));
@@ -1231,6 +1353,66 @@ void EditorUI::drawPiano(float width) {
         ImGui::SetScrollX(std::max(0.f, keys[root].x0 - 300.f));
     }
     ImGui::EndChild();
+}
+
+void EditorUI::drawKeyEnvelope(float width) {
+    auto& P = eng_.params;
+    const float sp = ImGui::GetStyle().ItemSpacing.x;
+    const float comboW = 130.f;
+
+    const float startX = ImGui::GetCursorPosX();
+    bool on = P.keyEnvEnabled.load();
+    if (ImGui::Checkbox("Envelope", &on)) P.keyEnvEnabled.store(on);
+    ImGui::SetItemTooltip(
+        "Plays the piano keys through a simple amplitude envelope\n"
+        "(Hold + Decay, sustain always 0), to hear how the sample behaves\n"
+        "under a sampler's envelope. Preview only: the sample isn't changed.");
+
+    ImGui::BeginDisabled(!on);
+    ImGui::SameLine();
+    const float used = ImGui::GetCursorPosX() - startX; // checkbox + spacing
+    const float sliderW = std::max(60.f, (width - used - comboW - 2.f * sp) * 0.5f);
+    ImGui::SetNextItemWidth(sliderW);
+    float hold = P.keyEnvHoldMs.load();
+    if (ImGui::SliderFloat("##keyEnvHold", &hold, 0.f, 10000.f, "Hold: %.0f ms",
+                           ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp))
+        P.keyEnvHoldMs.store(hold);
+    if (ImGui::IsItemClicked(1)) P.keyEnvHoldMs.store(0.f); // right-click: reset
+    ImGui::SetItemTooltip("Time at full level after the key press (Ctrl+click to type)");
+
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(sliderW);
+    float decay = P.keyEnvDecayMs.load();
+    if (ImGui::SliderFloat("##keyEnvDecay", &decay, 1.f, 60000.f, "Decay: %.0f ms",
+                           ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp))
+        P.keyEnvDecayMs.store(decay);
+    if (ImGui::IsItemClicked(1)) P.keyEnvDecayMs.store(1000.f); // right-click: reset
+    ImGui::SetItemTooltip("Decay time down to silence (sustain is 0), as the chosen\n"
+                          "template defines it (Ctrl+click to type)");
+
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(comboW);
+    int curve = std::clamp(P.keyEnvCurve.load(), 0, keyenv::kCurveCount - 1);
+    if (ImGui::BeginCombo("##keyEnvCurve", keyenv::curveName((keyenv::Curve)curve))) {
+        static const char* tips[keyenv::kCurveCount] = {
+            "Amplitude falls in a straight line to 0 over the decay time.",
+            "FluidSynth volume envelope (decay to sustain 0, or release):\n"
+            "linear in dB, reaches -96 dB at the decay time.",
+            "sfizz ampeg decay to ampeg_sustain=0: exponential, cut at -60 dB\n"
+            "(~0.77 x the time) with a 50 ms fade.",
+            "sfizz ampeg release: exponential down to -80 dB (~1.02 x the time),\n"
+            "then a 50 ms fade-out.",
+        };
+        for (int i = 0; i < keyenv::kCurveCount; ++i) {
+            if (ImGui::Selectable(keyenv::curveName((keyenv::Curve)i), i == curve))
+                P.keyEnvCurve.store(i);
+            ImGui::SetItemTooltip("%s", tips[i]);
+            if (i == curve) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SetItemTooltip("Shape of the decay");
+    ImGui::EndDisabled();
 }
 
 // ------------------------------------------------------------------ misc

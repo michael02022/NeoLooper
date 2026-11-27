@@ -1,5 +1,8 @@
 #include "engine.hpp"
 
+#include "key_envelope.hpp"
+
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -36,6 +39,7 @@ void Engine::publishEnvelopes(EnvelopesPtr e) {
 
 void Engine::play() {
     curNote_.store(-1); // the Play button plays at the root note + finetune
+    keyNote_.store(false); // ...and never through the piano envelope
     if (transport_.load() != Playing) transport_.store(Playing);
 }
 
@@ -43,6 +47,8 @@ void Engine::pause() { transport_.store(Stopped); }
 
 void Engine::playFromNote(int note) {
     curNote_.store(note);
+    keyNote_.store(true);
+    keySeq_.fetch_add(1); // restarts the piano envelope
     seek(0.0);
     transport_.store(Playing);
 }
@@ -132,35 +138,59 @@ void Engine::activate(double sampleRate) {
 }
 
 float Engine::sampleInterp(const AudioData& d, int c, double pos,
-                           bool looping, int64_t ls, int64_t le) const {
+                           bool looping, int64_t ls, int64_t le,
+                           PlaybackInterp mode) const {
     int64_t i0 = (int64_t)std::floor(pos);
     float t = (float)(pos - (double)i0);
-    float w[SincInterp16::kTaps];
-    sinc_.weights(t, w);
     const int64_t loopLen = le - ls;
     // Only wrap the taps when the current position is ALREADY inside the
     // loop (not during the attack preceding ls, which plays once and must
     // sound exactly as-is, without mixing in content from the loop's end).
     const bool insideLoop = looping && loopLen > 0 && i0 >= ls && i0 < le;
-    float acc = 0.f;
-    for (int k = 0; k < SincInterp16::kTaps; ++k) {
-        int64_t idx = i0 + (k - (SincInterp16::kHalf - 1));
+    auto wrap = [&](int64_t idx) {
         if (insideLoop && (idx < ls || idx >= le)) {
             int64_t rel = (idx - ls) % loopLen;
             if (rel < 0) rel += loopLen;
             idx = ls + rel;
         }
-        acc += w[k] * d.at(c, idx);
+        return idx;
+    };
+    switch (mode) {
+    case PlaybackInterp::None:
+        return d.at(c, i0);
+    case PlaybackInterp::Linear: {
+        float a = d.at(c, i0), b = d.at(c, wrap(i0 + 1));
+        return a + t * (b - a);
     }
+    case PlaybackInterp::Cubic: {
+        // Catmull-Rom spline through x[i0-1..i0+2]: passes through every
+        // sample, continuous slope (the classic "cubic" of samplers/trackers).
+        const float x0 = d.at(c, wrap(i0 - 1)), x1 = d.at(c, i0);
+        const float x2 = d.at(c, wrap(i0 + 1)), x3 = d.at(c, wrap(i0 + 2));
+        const float a1 = 0.5f * (x2 - x0);
+        const float a2 = x0 - 2.5f * x1 + 2.f * x2 - 0.5f * x3;
+        const float a3 = 0.5f * (x3 - x0) + 1.5f * (x1 - x2);
+        return ((a3 * t + a2) * t + a1) * t + x1;
+    }
+    case PlaybackInterp::Sinc16:
+        break;
+    }
+    float w[SincInterp16::kTaps];
+    sinc_.weights(t, w);
+    float acc = 0.f;
+    for (int k = 0; k < SincInterp16::kTaps; ++k)
+        acc += w[k] * d.at(c, wrap(i0 + (k - (SincInterp16::kHalf - 1))));
     return acc;
 }
 
 void Engine::process(const float* inL, const float* inR,
                      float* outL, float* outR, uint32_t n) {
-    // FX passthrough: the input always passes through to the output
+    // FX passthrough: the input passes through to the output (off in the
+    // standalone, see setPassThrough)
+    const bool thru = passThrough_.load(std::memory_order_relaxed);
     for (uint32_t i = 0; i < n; ++i) {
-        outL[i] = inL ? inL[i] : 0.f;
-        outR[i] = inR ? inR[i] : (inL ? inL[i] : 0.f);
+        outL[i] = thru && inL ? inL[i] : 0.f;
+        outR[i] = thru ? (inR ? inR[i] : (inL ? inL[i] : 0.f)) : 0.f;
     }
 
     // refresh snapshot caches (never blocks)
@@ -168,6 +198,8 @@ void Engine::process(const float* inL, const float* inR,
     prevSlot_.tryGet(rtPrev_);
     docPrevSlot_.tryGet(rtDocPrev_);
     envSlot_.tryGet(rtEnv_);
+    const float monTarget = monitorGainTarget_.load(std::memory_order_relaxed);
+    const float monStep = 1.f - std::exp(-1.f / (0.005f * (float)hostSr_.load()));
 
     const int tr = transport_.load();
     const double hostSr = hostSr_.load();
@@ -208,6 +240,11 @@ void Engine::process(const float* inL, const float* inR,
         seekSeen_ = seq;
         pos_ = seekPos_.load();
     }
+    uint32_t kseq = keySeq_.load();
+    if (kseq != keySeen_) {
+        keySeen_ = kseq;
+        keyEnvT_ = 0.0;
+    }
     if (preview != wasPreview_) {
         wasPreview_ = preview;
         pos_ = 0.0;
@@ -217,6 +254,14 @@ void Engine::process(const float* inL, const float* inR,
     const float gTarget = playing ? 1.f : 0.f;
     // ~3 ms anti-click ramp
     const float gCoef = 1.f - std::exp(-1.f / (0.003f * (float)hostSr));
+    // ...except when playback starts at the very first sample: that's the
+    // sample's own attack (Play with no selection, a piano key, a preview
+    // restart), and a sampler plays it as-is -- the ramp would soften the
+    // transient (a hard "pop" turned into a small fade-in). Resuming
+    // mid-sample keeps the ramp, where it does prevent a click; so does
+    // stopping.
+    if (playing && !wasPlaying_ && pos_ < 0.5) gain_ = 1.f;
+    wasPlaying_ = playing;
 
     if (doc && doc->frames() > 0 && (playing || gain_ > 1e-4f)) {
         const int note = curNote_.load();
@@ -269,13 +314,23 @@ void Engine::process(const float* inL, const float* inR,
         const bool envPan = envp && envp->pan.isActive() && nch > 1;
         const bool envSep = envp && envp->sep.isActive() && nch > 1;
         const bool envPitch = envp && envp->pitch.isActive();
+        // Piano preview envelope (key_envelope.hpp), in real time since the
+        // key press; when it reaches silence playback stops like at the end.
+        const bool keyEnv = keyNote_.load() && params.keyEnvEnabled.load();
+        const auto keyCurve = (keyenv::Curve)std::clamp(
+            params.keyEnvCurve.load(), 0, keyenv::kCurveCount - 1);
+        const double keyHold = std::max(0.f, params.keyEnvHoldMs.load()) * 1e-3;
+        const double keyDecay = std::max(0.f, params.keyEnvDecayMs.load()) * 1e-3;
+        const double keyDt = 1.0 / hostSr;
+        const auto interp = (PlaybackInterp)std::clamp(params.playbackInterp.load(), 0,
+                                                       kPlaybackInterpCount - 1);
         bool ended = false;
         for (uint32_t i = 0; i < n; ++i) {
             gain_ += (gTarget - gain_) * gCoef;
             float l = 0.f, r = 0.f;
             if (!ended) {
-                l = sampleInterp(*doc, 0, pos_, looping, ls, le);
-                r = (nch > 1) ? sampleInterp(*doc, 1, pos_, looping, ls, le) : l;
+                l = sampleInterp(*doc, 0, pos_, looping, ls, le, interp);
+                r = (nch > 1) ? sampleInterp(*doc, 1, pos_, looping, ls, le, interp) : l;
                 if (envAmp) {
                     float a = envp->amp.valueAt(pos_);
                     l *= a;
@@ -287,6 +342,14 @@ void Engine::process(const float* inL, const float* inR,
                     float side = 0.5f * (l - r) * (1.f - s);
                     l = mid + side;
                     r = mid - side;
+                }
+                if (keyEnv && playing) {
+                    bool done = false;
+                    float g = keyenv::gain(keyCurve, keyEnvT_, keyHold, keyDecay, done);
+                    keyEnvT_ += keyDt;
+                    l *= g;
+                    r *= g;
+                    if (done) ended = true;
                 }
                 if (envPan) {
                     float p = envp->pan.valueAt(pos_);
@@ -317,6 +380,16 @@ void Engine::process(const float* inL, const float* inR,
             }
             l *= gain_;
             r *= gain_;
+            // Monitoring gain (see setMonitorGain): ~5 ms ramp, clamp while boosting.
+            monitorGain_ += (monTarget - monitorGain_) * monStep;
+            if (monitorGain_ != 1.f) {
+                l *= monitorGain_;
+                r *= monitorGain_;
+                if (monitorGain_ > 1.f) {
+                    l = std::clamp(l, -1.f, 1.f);
+                    r = std::clamp(r, -1.f, 1.f);
+                }
+            }
             outL[i] += l;
             outR[i] += r;
             // oscilloscope: mono mix of what was played

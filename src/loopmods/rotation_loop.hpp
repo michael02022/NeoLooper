@@ -3,38 +3,37 @@
 #include "loop_module.hpp"
 #include "rotation_loop_dsp.hpp"
 
-// Rotation: a "unison"/supersaw-style thickener built from a loop that's
-// ALREADY MARKED and seamless -- requires loop start/end to be defined
-// (unlike Freeze) and, unlike Harmonic, doesn't synthesize anything itself:
-// it assumes [ls_, le_) is already a perfect loop (e.g. written by this
-// program itself, or by Harmonic) and just reorders it. Port of
-// proto/rotation_loop.py; the DSP core lives in rotation_loop_dsp.hpp so it
-// can be tested without ImGui.
+// Rotation: a "unison"/supersaw-style thickener built from the MARKED loop
+// [ls_, le_) -- requires loop start/end to be defined (unlike Freeze) and,
+// unlike Harmonic, doesn't synthesize anything itself: it reorders the
+// loop's own audio. Port of proto/rotation_loop.py (reworked, see
+// rotation_loop_dsp.hpp); the DSP core lives there so it can be tested
+// without ImGui.
 //
 // The method, in order:
-//   1. "Quality (layers)" (2-100): number of circularly rotated copies of
-//      the marked loop summed together. Each copy is spectrally identical
-//      (same waveform, just a different entry point), but since they're out
-//      of phase with each other the mix sounds denser without losing volume
-//      (auto-compensated level, equal-power).
-//   2. "Seed" (-1..max): which rotation offsets are used. -1 = random on
+//   1. Optional, off by default ("Make seamless first"): Classic Crossfade
+//      (Inside) (its same two sliders) over the marked loop FIRST: blends
+//      its own tail into its own head, the head then plays as attack and
+//      the loop that remains wraps seamlessly -- so every rotated layer,
+//      and their sum, is seamless too (no blend is needed afterward). Off:
+//      the marked loop is rotated as-is and must already be seamless.
+//   2. "Quality (layers)" (2-100): number of circularly rotated copies of
+//      that loop summed together. Each copy is spectrally identical (same
+//      waveform, just a different entry point), but since they're out of
+//      phase with each other the mix sounds denser; the sum is scaled to
+//      exactly the loop's own energy per channel, keeping its DC.
+//   3. "Seed" (-1..max): which rotation offsets are used. -1 = random on
 //      each render; any other value = reproducible.
-//   3. "Crossfade"/"Curve": blends the real ATTACK (audio before ls_) into
-//      the start of the already-thickened loop -- the same rotation
-//      technique aligned via circular correlation that Harmonic uses (see
-//      spectral_loop_core.hpp), which is why Document::replaceRange in
-//      apply() starts at ls_-xfadeN, not at ls_.
-//   4. Last step: reuses, as-is, Classic Crossfade (Inside)'s processing
-//      (and its same two sliders) over the already-thickened loop spliced
-//      with the attack -- blends its own tail into its own head, and that
-//      head then plays as attack (it's no longer part of the repeating
-//      loop; the loop end doesn't move, see crossfade_inside_core.hpp).
+//   4. "Crossfade"/"Curve": blends the real ATTACK (audio before ls_) into
+//      the start of the thickened loop, rotated to where it best correlates
+//      with that attack (one rotation for all channels, or one each with
+//      "Align channels separately") -- which is why Document::replaceRange
+//      in apply() starts at ls_-xfadeN, not at ls_.
 //
-// preview_ concatenates, in this order, the entry crossfade (step 3) + the
-// head excluded by step 4 + the final loop with its tail already blended;
-// previewLoopOffset() tells the engine that only that last part (from
-// xfadeN+ccAvail onward) repeats forever -- same mechanism as
-// Harmonic/Freeze.
+// preview_ concatenates, in this order, the entry crossfade (step 4) + the
+// head excluded by step 1 + the final loop; previewLoopOffset() tells the
+// engine that only that last part (from xfadeN+ccAvail onward) repeats
+// forever -- same mechanism as Harmonic/Freeze.
 class RotationLoop : public LoopModule {
 public:
     const char* name() const override { return "Rotation"; }
@@ -60,8 +59,16 @@ private:
     int seed_ = -1;       // -1 = random on each render; 0..kMaxSeed = reproducible
     float xfadeMs_ = 30.f;
     float xfadeCurve_ = 0.5f; // 0 = linear, 1 = equal power
-    float ccPct_ = 25.f;      // Classic Crossfade (Inside), reused as the final step
+    // Optional first step, off by default: Classic Crossfade (Inside) over
+    // the marked loop so it's seamless before rotating (ccPct_ only counts
+    // while useCcInside_ is on; off = the loop is rotated as marked).
+    bool useCcInside_ = false;
+    float ccPct_ = 25.f;
     float ccShape_ = 1.f;     // same
+    float effectiveCcPct() const { return useCcInside_ ? ccPct_ : 0.f; }
+    // Stereo: align each channel with its own attack instead of one shared
+    // rotation (rotationdsp::buildRotationLoop's alignPerChannel).
+    bool alignPerChannel_ = false;
 
     // Result cached from the last render(): apply() reuses it AS-IS (doesn't
     // call buildRotationLoop again) so what gets printed into the document
@@ -70,7 +77,7 @@ private:
     // apply() would apply audio different from what was heard (same bug
     // Granular had, see that .hpp's comment; here it had gone uncorrected).
     bool lastOk_ = true;
-    bool lastSafetyNormalized_ = false;
+    float lastPeak_ = 0.f;
     int64_t lastXfadeN_ = 0;
     int64_t lastCcAvail_ = 0;
     rotationdsp::Result lastResult_;

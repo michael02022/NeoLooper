@@ -7,8 +7,8 @@
 #include "filter_dsp.hpp"
 
 // Filter: resonant high-pass (adjustable slope 12..96 dB/oct, Q on the first
-// stage) + a bell band (peaking EQ with +/- gain, mainly meant to add
-// brightness to the highs) -- replaces the previous graphic Equalizer
+// stage) + a high-shelf (+/- gain on everything above its frequency,
+// mainly meant to add brightness to the highs) -- replaces the previous graphic Equalizer
 // (Envelope + FFT filtering), which the user found unreliable to read/use.
 // Filtering happens in the time domain (classic biquads, see
 // filter_dsp.hpp), with no FFT involved in the actual processing -- only the

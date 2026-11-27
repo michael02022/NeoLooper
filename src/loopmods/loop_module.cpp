@@ -33,6 +33,17 @@ void LoopModule::draw(Document& doc, Engine& eng) {
         }
 
         ImGui::Separator();
+        ImGui::SliderFloat("Monitoring volume", &monitorDb_, 0.f, 40.f, "+%.1f dB",
+                           ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SetItemTooltip(
+            "Only affects monitoring: boosts what you hear and the "
+            "oscilloscope while this window is open, so quiet parts of the "
+            "sample are easier to loop. It is NOT applied to the sample, and "
+            "it starts at +0 dB every time a loop method is opened. While "
+            "boosting, loud parts are "
+            "clipped at 0 dBFS to protect your ears. Middle-click to type "
+            "the exact value.");
+        eng.setMonitorGain(std::pow(10.f, monitorDb_ / 20.f));
         if (ImGui::Button("Apply", ImVec2(120, 0))) {
             apply(doc);
             keep = false;

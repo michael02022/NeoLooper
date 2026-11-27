@@ -1,0 +1,21 @@
+Snaptune -- pitch correction (auto-tune) DSP by Nicolas Fernandez (NicoFerni).
+Upstream: https://github.com/NicoFerni/snaptune
+Commit: 3b8dbbb78aeed6b8a1068382c20e13f176fc664b (2026-11-19)
+License: GNU AGPL v3 (see LICENSE in this directory).
+
+Only the DSP is vendored (dsp/ = upstream Source/dsp/: AutoTuneEngine,
+PitchDetector, Scales, VibratoTracker); the JUCE plugin wrapper, editor,
+telemetry, update checker and KeyFinder are not. Used by NeoLooper's
+Process > Autotune (src/procmods/autotune*.{hpp,cpp}), offline and in
+Studio mode only (the TD-PSOLA path; Live mode is compiled but never
+selected).
+
+JUCE is NOT required: shim/ provides the handful of JUCE pieces the DSP
+calls (jlimit, MathConstants, SmoothedValue, AbstractFifo, dsp::FFT) under
+the same include names (juce_audio_basics/juce_audio_basics.h,
+juce_dsp/juce_dsp.h). shim/ is NeoLooper's own code.
+
+Local changes to the upstream files (marked "NeoLooper patch"):
+  * dsp/AutoTuneEngine.h/.cpp: PitchFrame gains a 'time' field (the input
+    sample position of the hop it describes), filled in updateCorrection(),
+    so the pitch graph can be aligned with the audio.

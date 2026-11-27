@@ -46,6 +46,13 @@ void FileDialog::open(Mode mode, const char* title,
     infoText_.clear();
 }
 
+void FileDialog::setDirectory(const std::string& dir) {
+    std::error_code ec;
+    if (dir.empty() || !fs::is_directory(dir, ec)) return;
+    cwd_ = dir;
+    needRefresh_ = true;
+}
+
 int FileDialog::addCombo(const char* label, std::vector<std::string> items, int index) {
     Combo c;
     c.label = label;

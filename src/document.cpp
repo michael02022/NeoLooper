@@ -475,6 +475,31 @@ void Document::applyAmplitude(const amplitudedsp::AmplitudeSpec& spec) {
     toast(selOnly ? "Amplitude applied to selection" : "Amplitude applied");
 }
 
+void Document::applyAutotune(const autotunedsp::Spec& spec,
+                             const std::vector<std::vector<float>>* precomputed) {
+    if (!hasAudio()) return;
+    int64_t s0 = 0, s1 = frames();
+    bool selOnly = hasSelection();
+    if (selOnly) {
+        s0 = selStart();
+        s1 = selEnd();
+    }
+    if (s1 <= s0) return;
+
+    autotunedsp::Result res;
+    const bool reuse = precomputed && (int)precomputed->size() == cur_->channels() &&
+                       std::all_of(precomputed->begin(), precomputed->end(),
+                                   [&](const std::vector<float>& v) { return (int64_t)v.size() == s1 - s0; });
+    if (!reuse && (!autotunedsp::apply(*cur_, s0, s1, spec, res) || res.audio.empty())) return;
+    const auto& audio = reuse ? *precomputed : res.audio;
+
+    auto d = std::make_shared<AudioData>(*cur_);
+    for (int c = 0; c < d->channels(); ++c)
+        std::copy(audio[(size_t)c].begin(), audio[(size_t)c].end(), d->ch[(size_t)c].begin() + s0);
+    commit(std::move(d), selOnly ? "Autotune (selection)" : "Autotune");
+    toast(selOnly ? "Autotune applied to selection" : "Autotune applied");
+}
+
 void Document::spliceAndRemap(int64_t s0, int64_t s1, std::vector<std::vector<float>>&& piece,
                               const char* opName) {
     const int64_t oldLen = s1 - s0;
@@ -575,6 +600,15 @@ void Document::toMono(int mode) {
     }
     const char* names[] = {"To mono (L channel)", "To mono (R channel)", "To mono (mix)"};
     commit(std::move(d), names[std::min(2, std::max(0, mode))]);
+}
+
+void Document::toStereo() {
+    if (!hasAudio() || cur_->channels() != 1) return;
+    auto d = std::make_shared<AudioData>(*cur_);
+    d->ch.push_back(d->ch[0]);
+    // Same length: loop points and selection stay where they were.
+    commit(std::move(d), "Mono to stereo");
+    toast("Converted to stereo");
 }
 
 void Document::changeSampleRate(double sr, bool resample) {
@@ -821,6 +855,36 @@ void Document::trimBeforeLoopStart() {
     clampMarkersToLength();
     clearSelection();
     toast("Audio before loop start removed (attack trimmed)");
+}
+
+void Document::trimToSelection() {
+    if (!hasAudio() || !hasSelection()) return;
+    const int64_t s = selStart(), e = selEnd();
+    if (s <= 0 && e >= frames()) {
+        toast("The selection already is the whole sample");
+        return;
+    }
+    // Loop in the new coordinates, clipped to [0, e - s); gone if it was
+    // entirely outside the selection.
+    int64_t ls = params_.loopStart.load(), le = params_.loopEnd.load();
+    if (ls >= 0 && le > ls) {
+        ls = std::max<int64_t>(ls, s) - s;
+        le = std::min<int64_t>(le, e) - s;
+        if (le - ls < 1) ls = le = -1;
+    } else {
+        ls = le = -1;
+    }
+    auto d = std::make_shared<AudioData>(*cur_);
+    for (auto& v : d->ch) {
+        v.resize((size_t)e);
+        v.erase(v.begin(), v.begin() + s);
+    }
+    commit(std::move(d), "Trim to selection");
+    params_.loopStart.store(ls);
+    params_.loopEnd.store(le);
+    clampMarkersToLength();
+    clearSelection();
+    toast("Trimmed to the selection");
 }
 
 void Document::extendLoop() {

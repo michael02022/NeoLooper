@@ -61,6 +61,22 @@ Biquad makePeaking(double freq, double sr, double q, double gainDb) {
     return bq;
 }
 
+Biquad makeHighShelf(double freq, double sr, double q, double gainDb) {
+    Biquad bq;
+    const double w0 = 2.0 * M_PI * safeFreq(freq, sr) / sr;
+    const double cosw0 = std::cos(w0);
+    const double alpha = std::sin(w0) / (2.0 * q);
+    const double A = std::pow(10.0, gainDb / 40.0);
+    const double sqA2alpha = 2.0 * std::sqrt(A) * alpha;
+    const double a0 = (A + 1.0) - (A - 1.0) * cosw0 + sqA2alpha;
+    bq.b0 = A * ((A + 1.0) + (A - 1.0) * cosw0 + sqA2alpha) / a0;
+    bq.b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cosw0) / a0;
+    bq.b2 = A * ((A + 1.0) + (A - 1.0) * cosw0 - sqA2alpha) / a0;
+    bq.a1 = 2.0 * ((A - 1.0) - (A + 1.0) * cosw0) / a0;
+    bq.a2 = ((A + 1.0) - (A - 1.0) * cosw0 - sqA2alpha) / a0;
+    return bq;
+}
+
 namespace {
 // Chain of biquads (stateless, for responseAt) or with fresh state (for
 // apply, one per channel). buildChain() assembles the coefficient list from
@@ -74,7 +90,7 @@ std::vector<Biquad> buildChain(const FilterSpec& spec, double sr) {
         for (int i = 0; i < spec.hpStages; ++i)
             chain.push_back(makeHighpass(spec.hpFreq, sr, i == 0 ? spec.hpQ : kButterworthQ));
     if (spec.bandOn)
-        chain.push_back(makePeaking(spec.bandFreq, sr, spec.bandQ, spec.bandGainDb));
+        chain.push_back(makeHighShelf(spec.bandFreq, sr, spec.bandQ, spec.bandGainDb));
     return chain;
 }
 } // namespace

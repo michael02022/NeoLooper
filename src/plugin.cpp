@@ -1,6 +1,7 @@
 // CLAP glue: entry point, factory, plugin, audio ports, state and GUI.
 #include <clap/clap.h>
 
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -10,6 +11,7 @@
 #include "engine.hpp"
 #include "gui/editor_ui.hpp"
 #include "gui/gui_window.hpp"
+#include "clapwrapper/standalone_features.h"
 
 namespace {
 
@@ -25,6 +27,17 @@ struct Plugin {
     Document doc;
     std::unique_ptr<EditorUI> ui;
     std::unique_ptr<GuiWindow> window;
+    // Set when the host is the clap-wrapper standalone (NeoLooper
+    // standalone): its Audio/MIDI settings screen, opened from File >
+    // Audio Settings... The menu runs on the GUI thread and the screen must
+    // be opened on the main one, hence the flag + request_callback.
+    const clap_wrapper_standalone_features_t* standalone = nullptr;
+    std::atomic<bool> wantAudioSettings{false};
+    // ...and a timer that polls that flag: the Linux standalone never
+    // services request_callback (only its macOS/Windows versions do), but
+    // it does run clap timers on its main loop.
+    const clap_host_timer_support_t* hostTimer = nullptr;
+    clap_id timerId = CLAP_INVALID_ID;
 
     explicit Plugin(const clap_host_t* h)
         : host(h),
@@ -39,7 +52,9 @@ Plugin* self(const clap_plugin_t* p) {
 }
 
 const char* kFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT,
-                           CLAP_PLUGIN_FEATURE_UTILITY, nullptr};
+                           CLAP_PLUGIN_FEATURE_UTILITY,
+                           CLAP_PLUGIN_FEATURE_ANALYZER,
+                           CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 
 const clap_plugin_descriptor_t kDesc = {
     .clap_version = CLAP_VERSION_INIT,
@@ -223,11 +238,25 @@ bool guiCreate(const clap_plugin_t* plugin, const char* api, bool is_floating) {
         p->window.reset();
         return false;
     }
+    // Standalone: the settings-flag timer (see Plugin::hostTimer). Registered
+    // here, not in init(): the Linux standalone's timers live on its window,
+    // which doesn't exist yet at init() time.
+    if (p->standalone && p->timerId == CLAP_INVALID_ID) {
+        p->hostTimer = static_cast<const clap_host_timer_support_t*>(
+            p->host->get_extension(p->host, CLAP_EXT_TIMER_SUPPORT));
+        if (p->hostTimer && p->hostTimer->register_timer &&
+            !p->hostTimer->register_timer(p->host, 50, &p->timerId))
+            p->timerId = CLAP_INVALID_ID;
+    }
     return true;
 }
 
 void guiDestroy(const clap_plugin_t* plugin) {
     Plugin* p = self(plugin);
+    if (p->timerId != CLAP_INVALID_ID && p->hostTimer && p->hostTimer->unregister_timer) {
+        p->hostTimer->unregister_timer(p->host, p->timerId);
+        p->timerId = CLAP_INVALID_ID;
+    }
     if (p->window) {
         p->window->destroy();
         p->window.reset();
@@ -313,7 +342,27 @@ const clap_plugin_gui_t kExtGui = {
 
 // ------------------------------------------------------------------ plugin
 
-bool plugInit(const clap_plugin_t*) { return true; }
+bool plugInit(const clap_plugin_t* plugin) {
+    Plugin* p = self(plugin);
+    // Running inside the clap-wrapper standalone? (null in any DAW)
+    auto* sf = p->host && p->host->get_extension
+                   ? static_cast<const clap_wrapper_standalone_features_t*>(
+                         p->host->get_extension(p->host, CLAP_WRAPPER_STANDALONE_FEATURES))
+                   : nullptr;
+    if (sf && sf->supports_audio_midi_configuration_screen &&
+        sf->show_audio_midi_configuration_screen &&
+        sf->supports_audio_midi_configuration_screen(p->host)) {
+        p->standalone = sf;
+        // No input -> output passthrough on its own: a microphone would feed
+        // back through the speakers (recording still takes the input).
+        p->engine.setPassThrough(false);
+        p->ui->setAudioSettingsAction([p] {
+            p->wantAudioSettings.store(true);
+            p->host->request_callback(p->host); // -> plugOnMainThread
+        });
+    }
+    return true;
+}
 
 void plugDestroy(const clap_plugin_t* plugin) {
     Plugin* p = self(plugin);
@@ -360,14 +409,25 @@ clap_process_status plugProcess(const clap_plugin_t* plugin,
     return CLAP_PROCESS_CONTINUE;
 }
 
+void serviceMainThread(Plugin* p);
+void timerOnTimer(const clap_plugin_t* plugin, clap_id) { serviceMainThread(self(plugin)); }
+const clap_plugin_timer_support_t kExtTimer = {.on_timer = timerOnTimer};
+
 const void* plugGetExtension(const clap_plugin_t*, const char* id) {
     if (!strcmp(id, CLAP_EXT_AUDIO_PORTS)) return &kExtAudioPorts;
     if (!strcmp(id, CLAP_EXT_STATE)) return &kExtState;
     if (!strcmp(id, CLAP_EXT_GUI)) return &kExtGui;
+    if (!strcmp(id, CLAP_EXT_TIMER_SUPPORT)) return &kExtTimer;
     return nullptr;
 }
 
-void plugOnMainThread(const clap_plugin_t*) {}
+// Main thread: opens the standalone's Audio/MIDI settings if the menu asked.
+void serviceMainThread(Plugin* p) {
+    if (p->standalone && p->wantAudioSettings.exchange(false))
+        p->standalone->show_audio_midi_configuration_screen(p->host);
+}
+
+void plugOnMainThread(const clap_plugin_t* plugin) { serviceMainThread(self(plugin)); }
 
 // ----------------------------------------------------------------- factory
 

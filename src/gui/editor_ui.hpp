@@ -2,6 +2,7 @@
 #pragma once
 
 #include <memory>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -11,6 +12,8 @@
 #include "../loopmods/auto_loop_algorithm.hpp"
 #include "../loopmods/loop_module.hpp"
 #include "../procmods/amplitude.hpp"
+#include "../procmods/autotune.hpp"
+#include "../procmods/exciter.hpp"
 #include "../procmods/filter.hpp"
 #include "../procmods/pitch_method.hpp"
 #include "../procmods/stretch_method.hpp"
@@ -23,6 +26,10 @@ public:
 
     void draw();                             // full frame
     void openPath(const std::string& path);  // drag & drop / File->Open
+    // Standalone only: File > Audio Settings... calls this (set by
+    // plugin.cpp when the host is the clap-wrapper standalone). Called on
+    // the GUI thread; the handler must hop to the main thread itself.
+    void setAudioSettingsAction(std::function<void()> fn) { audioSettings_ = std::move(fn); }
 
 private:
     void drawMenuBar();
@@ -37,6 +44,8 @@ private:
     // draws nothing when nothing is sounding).
     void updateLiveSpectrum();
     void drawPiano(float width);
+    // Piano preview envelope controls (Hold/Decay/curve), under the piano.
+    void drawKeyEnvelope(float width);
     void drawDialogs();
     void drawToasts();
     void handleShortcuts();
@@ -62,7 +71,14 @@ private:
     Engine& eng_;
     WaveformView wave_;
     FileDialog fileDlg_;
+    std::function<void()> audioSettings_;
     int fileDlgPurpose_ = 0; // 0 open, 1 export WAV, 2 export FLAC, 3 export OGG, 4 export AIFF
+    // Folder of the last imported file (drag & drop or File > Open): the
+    // first export after an import starts browsing there; later exports
+    // keep wherever the dialog was left.
+    std::string importDir_;
+    bool exportDirPending_ = false;
+    void openExportDialog(const char* title, std::vector<std::string> exts, const std::string& name);
     // Bit depth of the exported WAV (index into the dialog's combo: 0=16,
     // 1=24, 2=32 float). Remembers the last choice for the session; starts
     // at 16-bit, the most compatible option (32-bit float, though it's the
@@ -104,6 +120,8 @@ private:
     std::vector<std::unique_ptr<LoopModule>> modules_;
     FilterTool filter_;       // Process > Filter... (preview via publishDocPreview, not a LoopModule)
     AmplitudeTool amplitude_; // Process > Amplitude... (same non-LoopModule scheme as filter_)
+    AutotuneTool autotune_;   // Process > Autotune... (Snaptune; same scheme as filter_)
+    ExciterTool exciter_;     // Process > Exciter... (M/S Exciter; same scheme as filter_)
     // Process > Pitch submenu: one entry per method (built-in, Signalsmith,
     // Loris), same one-window-per-entry pattern as Process > Stretch's
     // stretchMethods_ below. Registered in the constructor.

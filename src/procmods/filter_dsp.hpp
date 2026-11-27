@@ -4,10 +4,10 @@
 // filtering happens in the TIME DOMAIN with classic biquads (formulas from
 // Robert Bristow-Johnson's Audio EQ Cookbook), a cascaded high-pass
 // (adjustable slope, N stages of 12 dB/octave each, with Q/resonance on the
-// first stage) and a bell band (peaking EQ with +/- gain: boost or cut,
-// width via Q -- in practice, to add brightness to the highs, which was hard
-// to get with a low-pass; replaces the previous 4 notches, which in practice
-// went unused) -- much simpler and without the visualization/calibration
+// first stage) and a high-shelf (+/- gain on everything above its
+// frequency: boost or cut -- in practice, to add brightness to the highs,
+// which was hard to get with a low-pass; it replaced a bell band, which only
+// lifted a region around its center, and before that 4 notches) -- much simpler and without the visualization/calibration
 // issues of the previous STFT-based approach, since applying the filter
 // needs no window or FFT at all, just the biquad's difference equation,
 // sample by sample.
@@ -52,6 +52,11 @@ Biquad makeHighpass(double freq, double sr, double q);
 // gainDb positive = boost (the band's main use case: brightness in the
 // highs), negative = cut.
 Biquad makePeaking(double freq, double sr, double q, double gainDb);
+// RBJ high-shelf: unity below freq, gainDb above it, freq = the midpoint of
+// the transition (half the gain in dB). q shapes the knee: 0.707 = the
+// steepest without overshoot, lower = gentler, higher = a resonant dip/bump
+// on each side of the transition.
+Biquad makeHighShelf(double freq, double sr, double q, double gainDb);
 
 // 1..kMaxStages = number of cascaded stages in the high-pass (each one 12
 // dB/oct of slope, with no interaction between stages -- cascades of stable
@@ -72,12 +77,12 @@ struct FilterSpec {
     float hpFreq = 80.f;
     float hpQ = 1.f; // default resonance (0.707 = no resonance/Butterworth)
 
-    // Bell band (peaking EQ): +/- gain around bandFreq, width via Q.
-    // Replaces the previous low-pass and notches.
+    // High-shelf: +/- gain on everything above bandFreq (the midpoint of the
+    // transition), knee via Q (see makeHighShelf).
     bool bandOn = false;
     float bandFreq = 8000.f;
     float bandGainDb = 0.f;
-    float bandQ = 1.f;
+    float bandQ = (float)kButterworthQ;
 };
 
 // Filters src[s0,s1) for each channel (same length as the input, the filter

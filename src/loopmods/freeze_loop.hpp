@@ -1,6 +1,7 @@
 #pragma once
 
 #include "loop_module.hpp"
+#include "freeze_loop_dsp.hpp"
 
 // Freeze: pauses the sample at a point and sustains a frozen chunk that
 // OVERWRITES to the end of the sample -- the rest of the original sample
@@ -46,6 +47,9 @@ private:
     int fftSizeIdx_ = 4;       // 2048
     float freezePos_ = 0.5f;   // 0 = start of the sample, 1 = end
     float durationMs_ = 1000.f;
+    // Exact-cycle mode: the loop's length in cycles of the note (replaces
+    // the ms Duration slider there; see durationForDsp()).
+    int loopCycles_ = 1;
     float offsetFrac_ = 0.f;   // 0..1, manual rotation of the frozen chunk
     float xfadeMs_ = 30.f;
     float xfadeCurve_ = 0.5f;  // 0 = linear, 1 = equal power
@@ -58,7 +62,7 @@ private:
     // user having to work it out by hand. It's still a free slider
     // afterward: the user can readjust it.
     float tuneCents_ = 0.f;
-    // "Exact cycle" mode (Infinity's Freeze Looper): vocoder anchored to the
+    // "Exact cycle" mode: vocoder anchored to the
     // harmonic series of the document's root note, every cycle
     // bit-identical, and on Apply a loop of a SINGLE cycle gets marked
     // (minimal memory). Default ON (explicit user request): it's the
@@ -66,6 +70,28 @@ private:
     // alternative.
     bool cycleMode_ = true;
     int lastRootNote_ = 60; // detects root note changes while the window is open
+    // Exact-cycle cycle rebuilt from the averageMs-long
+    // section after the freeze point (0 = single STFT frame), and automatic phase alignment with the attack under the
+    // manual offset (see freezedsp::buildFreeze).
+    float averageMs_ = 0.f;
+    bool autoPhase_ = true;
+    float loopGainDb_ = 0.f; // user level of the frozen chunk, dB (0 = the synthesis' own level)
+    // The window always extends the crossfade and uses fractional k-cycle
+    // loops (see freezedsp::Extras).
+    freezedsp::Extras extras() const {
+        freezedsp::Extras x;
+        x.averageMs = averageMs_;
+        x.autoPhase = autoPhase_;
+        x.loopGainDb = loopGainDb_;
+        x.extendXfade = true;
+        x.fractionalCycles = true;
+        x.loopCycles = cycleMode_ ? loopCycles_ : 0;
+        return x;
+    }
+    // Duration handed to the DSP: in exact-cycle mode the ms equivalent of
+    // loopCycles_ (only sizes the analysis there; the cycle count goes
+    // exact through Extras::loopCycles), otherwise the ms slider.
+    float durationForDsp() const;
 
     // State cached from the last render(), used by previewRangeStart()/
     // previewRangeEnd()/previewLoopOffset() (called right after, same
@@ -76,6 +102,9 @@ private:
     int64_t lastFreezeStart_ = 0;
     int64_t lastXfadeN_ = 0;
     int64_t lastCyclePeriod_ = 0; // 0 in normal mode
+    int64_t lastAveragedCycles_ = 0; // 0 = single-frame analysis
+    int64_t lastLoopCycles_ = 0;     // cycles in the marked loop (exact-cycle mode)
+    float lastLoopPeak_ = 0.f;       // peak of the frozen chunk after loopGainDb_
     // FINAL chunk duration (post-tuning): sizes() doesn't know about
     // tuneCents (the tuning resample happens later, in buildFreeze), so the
     // info text uses this cached value instead of the cheap estimate.

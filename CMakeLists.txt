@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(NeoLooper VERSION 1.0.1 LANGUAGES C CXX)
+project(NeoLooper VERSION 1.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -231,7 +231,23 @@ else()
   set(WIN_DELAYLOAD_SRC)
 endif()
 
-add_library(neolooper MODULE
+# Snaptune (AGPL-3.0, see third_party/snaptune/VENDORED_FROM.txt): pitch
+# correction DSP behind Process > Autotune, built without JUCE via shim/.
+set(SNAPTUNE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/snaptune)
+set(SNAPTUNE_SRC
+  ${SNAPTUNE_DIR}/dsp/AutoTuneEngine.cpp
+  ${SNAPTUNE_DIR}/dsp/PitchDetector.cpp
+)
+set(SNAPTUNE_INCLUDES ${SNAPTUNE_DIR}/shim ${SNAPTUNE_DIR}/dsp)
+# Same as upstream: GCC's C99 Annex G NaN checks on every complex product
+# slow the DSP down; Snaptune never multiplies infinities.
+set_source_files_properties(${SNAPTUNE_SRC} PROPERTIES
+  COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:GNU>:-fcx-limited-range>")
+
+# Every source of the plugin itself. Compiled once into an OBJECT library
+# and linked into each plugin format: NeoLooper.clap, and NeoLooper.vst3
+# when NEOLOOPER_BUILD_VST3 is on (see below).
+add_library(neolooper_objs OBJECT
   src/plugin.cpp
   src/document.cpp
   src/engine.cpp
@@ -273,6 +289,8 @@ add_library(neolooper MODULE
   src/loopmods/auto_loop_loopauditioneer.cpp
   src/loopmods/semicycle_loop_finder.cpp
   src/loopmods/auto_loop_semicycle.cpp
+  src/loopmods/alt_loopers.cpp
+  src/loopmods/alt_loopers_dsp.cpp
   src/procmods/filter.cpp
   src/procmods/filter_dsp.cpp
   src/procmods/amplitude.cpp
@@ -292,6 +310,11 @@ add_library(neolooper MODULE
   src/procmods/stretch_signalsmith.cpp
   src/procmods/time_stretch_core.cpp
   src/procmods/loris_dsp.cpp
+  src/procmods/autotune_dsp.cpp
+  src/procmods/autotune.cpp
+  src/procmods/exciter_dsp.cpp
+  src/procmods/exciter.cpp
+  ${SNAPTUNE_SRC}
   ${LORIS_SRC}
   third_party/imgui/imgui.cpp
   third_party/imgui/imgui_draw.cpp
@@ -302,64 +325,132 @@ add_library(neolooper MODULE
 )
 
 # Single source of truth for the version: project(... VERSION) above.
-target_compile_definitions(neolooper PRIVATE NEOLOOPER_VERSION="${PROJECT_VERSION}")
-target_include_directories(neolooper PRIVATE
+target_compile_definitions(neolooper_objs PRIVATE NEOLOOPER_VERSION="${PROJECT_VERSION}")
+target_include_directories(neolooper_objs PRIVATE
   src
   third_party
+  ${SNAPTUNE_INCLUDES}
   third_party/clap/include
   third_party/imgui
   third_party/fontawesome
   ${LORIS_DIR}
   ${SIGNALSMITH_STRETCH_DIR}
 )
+# Usage requirements (headers/defines) of the dependencies for the objects;
+# the libraries themselves end up linked into each plugin binary
+# (neolooper_link_plugin below).
+target_link_libraries(neolooper_objs PRIVATE
+  ${SNDFILE_TARGET} ${RUBBERBAND_TARGET} ${FLAC_TARGET} ${VORBIS_TARGET}
+  ${VORBISENC_TARGET} ${VORBISFILE_TARGET} ${OGG_TARGET} OpenGL::GL Threads::Threads
+  $<$<NOT:$<BOOL:${WIN32}>>:X11::X11>)
 
-target_link_libraries(neolooper PRIVATE
-  ${SNDFILE_TARGET}
-  ${RUBBERBAND_TARGET}
-  ${FLAC_TARGET}
-  ${VORBIS_TARGET}
-  ${VORBISENC_TARGET}
-  ${VORBISFILE_TARGET}
-  ${OGG_TARGET}
-  OpenGL::GL
-  Threads::Threads
-)
-if(WIN32)
-  # gdi32: WGL pixel format + context; shell32: WM_DROPFILES (DragAcceptFiles/
-  # DragQueryFile); user32: window/message-loop APIs; delayimp: runtime
-  # support for the /DELAYLOAD imports resolved in src/win_delayload.cpp.
-  target_link_libraries(neolooper PRIVATE gdi32 shell32 user32 delayimp)
-  # FLAC/ogg/vorbis/vorbisenc/vorbisfile are now DIRECT imports (flac_io.cpp/
-  # ogg_io.cpp), not just sndfile.dll's transitive dependencies --
-  # src/win_delayload.cpp already primes all of these as "sibling libs"
-  # before sndfile.dll loads, but that priming only helps if they're ALSO
-  # delay-loaded themselves; otherwise the OS resolves them at plugin-load
-  # time via the host's own (wrong) search path, same problem
-  # sndfile.dll/rubberband-3.dll had.
-  target_link_options(neolooper PRIVATE
-    /DELAYLOAD:sndfile.dll /DELAYLOAD:rubberband-3.dll
-    /DELAYLOAD:FLAC.dll /DELAYLOAD:ogg.dll /DELAYLOAD:vorbis.dll
-    /DELAYLOAD:vorbisenc.dll /DELAYLOAD:vorbisfile.dll)
-  # "sndfile.dll" is a common name other audio software might also bundle;
-  # ship our copy under a plugin-unique name so a host process that loads
-  # many plugins together (a DAW) can never resolve someone else's
-  # same-named DLL to ours or vice versa. src/win_delayload.cpp redirects
-  # the linker's expected "sndfile.dll" name to this file at load time.
-  add_custom_command(TARGET neolooper POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:SndFile::sndfile>"
-            "$<TARGET_FILE_DIR:neolooper>/neolooper_sndfile.dll"
-    COMMENT "Copiando sndfile.dll con nombre unico (neolooper_sndfile.dll)"
+# Links the plugin objects and their dependencies into a plugin binary
+# (shared by the .clap and the .vst3).
+function(neolooper_link_plugin tgt)
+  target_sources(${tgt} PRIVATE $<TARGET_OBJECTS:neolooper_objs>)
+  target_link_libraries(${tgt} PRIVATE
+    ${SNDFILE_TARGET}
+    ${RUBBERBAND_TARGET}
+    ${FLAC_TARGET}
+    ${VORBIS_TARGET}
+    ${VORBISENC_TARGET}
+    ${VORBISFILE_TARGET}
+    ${OGG_TARGET}
+    OpenGL::GL
+    Threads::Threads
   )
-else()
-  target_link_libraries(neolooper PRIVATE X11::X11)
-endif()
+  if(WIN32)
+    # gdi32: WGL pixel format + context; shell32: WM_DROPFILES (DragAcceptFiles/
+    # DragQueryFile); user32: window/message-loop APIs; delayimp: runtime
+    # support for the /DELAYLOAD imports resolved in src/win_delayload.cpp.
+    target_link_libraries(${tgt} PRIVATE gdi32 shell32 user32 delayimp)
+    # FLAC/ogg/vorbis/vorbisenc/vorbisfile are now DIRECT imports (flac_io.cpp/
+    # ogg_io.cpp), not just sndfile.dll's transitive dependencies --
+    # src/win_delayload.cpp already primes all of these as "sibling libs"
+    # before sndfile.dll loads, but that priming only helps if they're ALSO
+    # delay-loaded themselves; otherwise the OS resolves them at plugin-load
+    # time via the host's own (wrong) search path, same problem
+    # sndfile.dll/rubberband-3.dll had.
+    target_link_options(${tgt} PRIVATE
+      /DELAYLOAD:sndfile.dll /DELAYLOAD:rubberband-3.dll
+      /DELAYLOAD:FLAC.dll /DELAYLOAD:ogg.dll /DELAYLOAD:vorbis.dll
+      /DELAYLOAD:vorbisenc.dll /DELAYLOAD:vorbisfile.dll)
+    # "sndfile.dll" is a common name other audio software might also bundle;
+    # ship our copy under a plugin-unique name so a host process that loads
+    # many plugins together (a DAW) can never resolve someone else's
+    # same-named DLL to ours or vice versa. src/win_delayload.cpp redirects
+    # the linker's expected "sndfile.dll" name to this file at load time.
+    add_custom_command(TARGET ${tgt} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "$<TARGET_FILE:SndFile::sndfile>"
+              "$<TARGET_FILE_DIR:${tgt}>/neolooper_sndfile.dll"
+      COMMENT "Copiando sndfile.dll con nombre unico (neolooper_sndfile.dll)"
+    )
+  else()
+    target_link_libraries(${tgt} PRIVATE X11::X11)
+  endif()
+endfunction()
 
+add_library(neolooper MODULE)
+neolooper_link_plugin(neolooper)
 set_target_properties(neolooper PROPERTIES
   PREFIX ""
   SUFFIX ".clap"
   OUTPUT_NAME "NeoLooper"
 )
+
+# ------------------------------------------------- VST3 and standalone
+# Both via clap-wrapper (https://github.com/free-audio/clap-wrapper, MIT):
+# the same plugin objects as the .clap plus clap-wrapper's layer, in ONE
+# self-contained binary each -- neither needs NeoLooper.clap installed.
+# clap-wrapper (and, for the VST3, the VST3 SDK, MIT since 3.8) are
+# downloaded at configure time; set VST3_SDK_ROOT to use a local SDK.
+option(NEOLOOPER_BUILD_VST3 "Also build NeoLooper.vst3 (downloads clap-wrapper and the VST3 SDK)" ON)
+option(NEOLOOPER_BUILD_STANDALONE "Also build the NeoLooper standalone app (downloads clap-wrapper)" ON)
+if(NEOLOOPER_BUILD_VST3 OR NEOLOOPER_BUILD_STANDALONE)
+  include(FetchContent)
+  set(CLAP_SDK_ROOT ${CMAKE_SOURCE_DIR}/third_party/clap CACHE PATH "CLAP SDK used by clap-wrapper")
+  set(CLAP_WRAPPER_DOWNLOAD_DEPENDENCIES ON CACHE BOOL "clap-wrapper fetches the SDKs it needs")
+  FetchContent_Declare(clap-wrapper
+    GIT_REPOSITORY https://github.com/free-audio/clap-wrapper.git
+    GIT_TAG v0.18.0
+    GIT_SHALLOW TRUE)
+  FetchContent_MakeAvailable(clap-wrapper)
+endif()
+
+if(NEOLOOPER_BUILD_VST3)
+  add_library(neolooper_vst3 MODULE)
+  neolooper_link_plugin(neolooper_vst3)
+  target_add_vst3_wrapper(
+    TARGET neolooper_vst3
+    OUTPUT_NAME "NeoLooper"
+    BUNDLE_VERSION "${PROJECT_VERSION}"
+    ASSET_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  if(NOT WIN32)
+    # Use the clap_entry linked into this very binary. (On Linux the
+    # wrapper's own self-lookup dlsym()s with a null handle, which misses a
+    # plugin the host loaded RTLD_LOCAL.) On Windows the self-lookup
+    # (GetProcAddress on its own module) is what finds the exported entry.
+    target_compile_definitions(neolooper_vst3-clap-wrapper-vst3-lib PRIVATE STATICALLY_LINKED_CLAP_ENTRY=1)
+  endif()
+endif()
+
+# Standalone app: the plugin in its own window, with clap-wrapper's audio
+# host (Linux: PipeWire and/or JACK, loaded at run time; Windows: WASAPI)
+# and its Audio/MIDI settings window (device, channels, sample rate, buffer
+# size), opened from NeoLooper's File > Audio Settings... (src/plugin.cpp).
+if(NEOLOOPER_BUILD_STANDALONE)
+  add_executable(neolooper_standalone)
+  neolooper_link_plugin(neolooper_standalone)
+  target_add_standalone_wrapper(
+    TARGET neolooper_standalone
+    OUTPUT_NAME "NeoLooper"
+    STATICALLY_LINKED_CLAP_ENTRY TRUE
+    PLUGIN_ID "com.michael02022.neolooper"
+    BUNDLE_VERSION "${PROJECT_VERSION}"
+    WINDOW_SIZE "1150x720"
+    BACKGROUND_COLOR "#0f0f0f")
+endif()
 
 # Host de prueba minimo: carga el .clap, lo instancia y procesa audio sin GUI.
 add_executable(mini_host test/mini_host.c)
@@ -383,6 +474,7 @@ add_executable(core_test
   src/loopmods/harmonic_loop_dsp.cpp
   src/loopmods/spectral_loop_core.cpp
   src/loopmods/freeze_loop_dsp.cpp
+  src/loopmods/alt_loopers_dsp.cpp
   src/loopmods/freeze_stretch_dsp.cpp
   src/loopmods/rotation_loop_dsp.cpp
   src/loopmods/granular_loop_dsp.cpp
@@ -400,10 +492,29 @@ add_executable(core_test
   src/procmods/signalsmith_stretch_dsp.cpp
   src/procmods/time_stretch_core.cpp
   src/procmods/loris_dsp.cpp
+  src/procmods/autotune_dsp.cpp
+  src/procmods/exciter_dsp.cpp
+  ${SNAPTUNE_SRC}
   ${LORIS_SRC}
 )
-target_include_directories(core_test PRIVATE src third_party ${LORIS_DIR} ${SIGNALSMITH_STRETCH_DIR})
+target_include_directories(core_test PRIVATE src third_party ${LORIS_DIR} ${SIGNALSMITH_STRETCH_DIR}
+  ${SNAPTUNE_INCLUDES})
 target_link_libraries(core_test PRIVATE
   ${SNDFILE_TARGET} ${RUBBERBAND_TARGET} ${FLAC_TARGET} ${VORBIS_TARGET} ${VORBISENC_TARGET}
   ${VORBISFILE_TARGET} ${OGG_TARGET}
   Threads::Threads ${M_LIB})
+
+# Tests of the extra loop modules (Ensemble, Random Phase) and of the Freeze/
+# Rotation options, in their own executable next to core_test.
+add_executable(alt_loop_test
+  test/alt_loop_test.cpp
+  src/loopmods/alt_loopers_dsp.cpp
+  src/loopmods/freeze_loop_dsp.cpp
+  src/resampler.cpp
+  src/loopmods/spectral_loop_core.cpp
+  src/loopmods/rotation_loop_dsp.cpp
+  src/loopmods/crossfade_inside_core.cpp
+  src/engine.cpp
+)
+target_include_directories(alt_loop_test PRIVATE src)
+target_link_libraries(alt_loop_test PRIVATE Threads::Threads ${M_LIB})

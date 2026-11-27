@@ -40,8 +40,49 @@ struct Result {
     // Exact-cycle mode: period in WHOLE samples (0 in normal mode).
     // nLoopSamples is always an exact multiple of cyclePeriod and every
     // cyclePeriod-sample chunk of the body is bit-identical to the rest.
+    // With Extras::fractionalCycles and loopCycles > 1, cyclePeriod is the
+    // length of the k-cycle loop instead (still the span marked on Apply).
     int64_t cyclePeriod = 0;
+    // Cycles inside cyclePeriod: 1 = one whole-sample cycle (original);
+    // k > 1 = Extras::fractionalCycles, k cycles in round(k*P) samples.
+    int64_t loopCycles = 0;
+    // averageMs > 0 (exact-cycle mode): whole cycles of the section that
+    // were averaged into the cycle (0 = single-frame analysis).
+    int64_t averagedCycles = 0;
+    float loopPeak = 0.f; // peak of the frozen chunk (loopRegion), after loopGainDb
     std::vector<ChannelResult> ch;
+};
+
+// Optional settings of buildFreeze(); the defaults give the plain
+// single-frame freeze.
+struct Extras {
+    // Exact-cycle mode: rebuild the cycle from the averageMs-long SECTION
+    // after the freeze point (altloop's HarmonicFreeze, rebuildLoop())
+    // instead of one STFT frame -- the section's average timbre, with the
+    // phase the audio has at the freeze point. 0 = single frame.
+    float averageMs = 0.f;
+    // Add, under the manual offset, the rotation that best correlates with
+    // the attack right before the freeze point (shared by every channel).
+    bool autoPhase = false;
+    // Level of the frozen chunk, dB over the synthesis' own level (the real
+    // attack is untouched; the crossfade blends into the new level).
+    float loopGainDb = 0.f;
+    // Entry crossfade only limited by the audio before the freeze point,
+    // not by the chunk: the (periodic) chunk is repeated under the attack as
+    // many times as the fade needs and keeps its own length.
+    bool extendXfade = false;
+    // Exact-cycle mode: instead of whole-sample cycles tiled to Duration,
+    // the loop is k = round(Duration/P) cycles in round(k*P) samples -- a
+    // fractional period: the rounding error (up to
+    // ~866/P cents with one cycle) is spread over the k cycles. The cycle
+    // is re-laid harmonic by harmonic (bin h -> h*k of the longer frame, no
+    // interpolation). Duration of about one cycle or less -> one
+    // whole-sample cycle, as before.
+    bool fractionalCycles = false;
+    // Exact-cycle mode: number of cycles in the loop, set directly (> 0
+    // overrides durationMs, which then only sizes the analysis); 0 = derive
+    // it from durationMs.
+    int64_t loopCycles = 0;
 };
 
 // Cheap arithmetic (no FFT), used both by buildFreeze() and for immediate
@@ -51,20 +92,18 @@ struct Result {
 // 0.
 void sizes(int64_t frames, double sampleRate, double freezePos, float durationMs,
           float xfadeMs, int nFft, int64_t& freezeStart, int64_t& xfadeNRequested,
-          int64_t& xfadeN, int64_t& nLoopSamples);
+          int64_t& xfadeN, int64_t& nLoopSamples, bool extendXfade = false);
 
 // Synthesis (specloop::synthesize, method=Naive) + manual tuning by
 // resampling (tuneCents, -99..99) + MANUAL rotation (offsetFrac, no search)
 // + entry blend (specloop::rotateAndBlend). false if there isn't enough
 // audio around the freeze point for the chosen fft-size.
 //
-// cycleMode=true -- "exact cycle" mode, port of Infinity's Freeze Looper
-// ("quantizes all the sound energy in the loop to a precise harmonic
-// series... a waveform that is perfectly repeated in every cycle"): uses
-// the phase vocoder (not Naive) with the quantization anchored to the
-// note's harmonic series (MIDI rootNote, like Infinity's "MIDI Note
-// Number", plus tuneCents as a fine adjustment of the target -- nothing is
-// resampled here). The period is rounded to WHOLE samples (cyclePeriod =
+// cycleMode=true -- "exact cycle" mode: all the sound energy is quantized
+// to a precise harmonic series, a waveform perfectly repeated in every
+// cycle. Uses the phase vocoder (not Naive) with the quantization anchored
+// to the note's harmonic series (MIDI rootNote, plus tuneCents as a fine
+// adjustment of the target -- nothing is resampled here). The period is rounded to WHOLE samples (cyclePeriod =
 // round(sr/f0); the real fundamental becomes sr/cyclePeriod, the classic
 // tuning quantization of old samplers) and the body is built by folding the
 // synthesis down to a single averaged cycle and tiling it: every cycle is
@@ -72,8 +111,11 @@ void sizes(int64_t frames, double sampleRate, double freezePos, float durationMs
 // cycle is enough). With durationMs~0 the body is exactly one cycle.
 // seamError reports the fold's maximum residual (how much non-harmonic
 // "impurity" got averaged out), the wrap itself is exact by construction.
+//
+// x: optional settings (see Extras).
 bool buildFreeze(const AudioData& src, double freezePos, float durationMs,
                  float offsetFrac, float xfadeMs, float xfadeCurve, float tuneCents,
-                 int nFft, bool cycleMode, int rootNote, Result& out);
+                 int nFft, bool cycleMode, int rootNote, Result& out,
+                 const Extras& x = Extras());
 
 } // namespace freezedsp

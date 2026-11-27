@@ -42,6 +42,17 @@ public:
     // Envelopes being edited: published every GUI frame so they're AUDIBLE
     // in real time during playback (Edison-style).
     void publishEnvelopes(EnvelopesPtr e);
+    // Monitoring-only gain (linear, 1 = unity): scales what's heard AND
+    // what the oscilloscope shows, never the document or anything that gets
+    // applied. Set by the loop modules' "Monitoring volume" (to work on
+    // quiet parts of a sample) and reset to 1 when they close. Ramped on
+    // the audio thread; while it's above unity the output is clamped to
+    // [-1, 1] so a boosted loud passage can't blow up the monitors.
+    void setMonitorGain(float g) { monitorGainTarget_.store(g); }
+    // Input -> output passthrough (on by default: an effect in a DAW). The
+    // standalone turns it off, or a microphone input would feed back
+    // through the speakers; recording from the input works either way.
+    void setPassThrough(bool on) { passThrough_.store(on); }
 
     void play();                 // resumes from the playhead
     void pause();                // freezes the playhead
@@ -92,6 +103,12 @@ private:
 
     std::atomic<int> transport_{Stopped};
     std::atomic<int> curNote_{-1}; // -1 = play at the root note
+    // Piano preview envelope: true while the current playback was started by
+    // a piano key (playFromNote); keySeq_ restarts the envelope on each press.
+    std::atomic<bool> keyNote_{false};
+    std::atomic<uint32_t> keySeq_{0};
+    uint32_t keySeen_ = 0;
+    double keyEnvT_ = 0.0; // audio thread: seconds since the key press
     std::atomic<bool> previewOn_{false};
     std::atomic<bool> docPreviewOn_{false};
     std::atomic<int64_t> previewLoopOffset_{0};
@@ -105,7 +122,11 @@ private:
 
     double pos_ = 0.0;   // audio thread's playhead (document frames)
     float gain_ = 0.f;   // anti-click ramp
+    std::atomic<float> monitorGainTarget_{1.f};
+    std::atomic<bool> passThrough_{true};
+    float monitorGain_ = 1.f; // audio thread: ramped toward monitorGainTarget_
     bool wasPreview_ = false;
+    bool wasPlaying_ = false; // audio thread: transport state of the previous block
 
     // --- chunked recording (the audio thread only writes into memory that's
     // already allocated; the GUI keeps allocating ahead of it) ---
@@ -134,6 +155,8 @@ private:
     // le==frames()): without this you hear a click at the wrap point
     // whenever the playback ratio isn't exactly 1.0 (root note/finetune, or
     // a host sample rate different from the document's).
+    // The same wrap applies to the Linear/Cubic interpolations' extra points.
     float sampleInterp(const AudioData& d, int c, double pos,
-                       bool looping, int64_t ls, int64_t le) const;
+                       bool looping, int64_t ls, int64_t le,
+                       PlaybackInterp mode = PlaybackInterp::Sinc16) const;
 };

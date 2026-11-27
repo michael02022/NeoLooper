@@ -67,10 +67,37 @@ LoadResult loadMp3(const std::string& path) {
     return r;
 }
 
+// What the file really is, from its first bytes -- the extension can lie
+// (e.g. a WAV saved as ".mp3" by a web download): picking the decoder by
+// extension alone fed RIFF data to dr_mp3 and loaded garbage/nothing.
+enum class Sniffed { Unknown, Container, Ogg, Mp3 };
+
+Sniffed sniffFile(const std::string& path) {
+    unsigned char h[12] = {};
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return Sniffed::Unknown;
+    size_t n = fread(h, 1, sizeof(h), f);
+    fclose(f);
+    auto is = [&](const char* m) { return n >= 4 && memcmp(h, m, 4) == 0; };
+    if (is("OggS")) return Sniffed::Ogg;
+    // RIFF/RIFX/RF64 (WAV), FORM (AIFF), fLaC, CAF, WavPack, Sun .au, W64
+    if (is("RIFF") || is("RIFX") || is("RF64") || is("FORM") || is("fLaC") ||
+        is("caff") || is("wvpk") || is(".snd") || is("riff"))
+        return Sniffed::Container;
+    // ID3v2 tag, or a bare MPEG audio frame sync (11 set bits) with layer != 0
+    if (n >= 3 && memcmp(h, "ID3", 3) == 0) return Sniffed::Mp3;
+    if (n >= 2 && h[0] == 0xFF && (h[1] & 0xE0) == 0xE0 && (h[1] & 0x06) != 0)
+        return Sniffed::Mp3;
+    return Sniffed::Unknown;
+}
+
 } // namespace
 
 LoadResult loadAudioFile(const std::string& path) {
-    if (hasExtension(path, ".mp3")) return loadMp3(path);
+    // Content first; the extension only decides when the header is unknown.
+    const Sniffed kind = sniffFile(path);
+    if (kind == Sniffed::Mp3 || (kind == Sniffed::Unknown && hasExtension(path, ".mp3")))
+        return loadMp3(path);
 
     LoadResult r;
     SF_INFO info{};
@@ -151,7 +178,7 @@ LoadResult loadAudioFile(const std::string& path) {
     // Ogg Vorbis loop points: not a chunk libsndfile or foreign_metadata.cpp
     // would ever find (Vorbis comments are plain tags, not RIFF/AIFF-style
     // binary chunks) -- see ogg_io.hpp's exportOgg/readOggLoopTags.
-    if (r.loopStart < 0 && hasExtension(path, ".ogg")) {
+    if (r.loopStart < 0 && kind == Sniffed::Ogg) {
         int64_t ls, le;
         if (readOggLoopTags(path, ls, le)) {
             r.hasInstrument = true;

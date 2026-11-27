@@ -41,12 +41,14 @@ public:
         le_ = le;
         open_ = true;
         dirty_ = true;
+        monitorDb_ = 0.f; // every time a method is invoked, monitoring starts at unity
         preview_.reset();
     }
 
     void close(Engine& eng) {
         if (!open_) return;
         open_ = false;
+        eng.setMonitorGain(1.f); // monitoring only lives while the window is open
         eng.publishPreview(nullptr);
         preview_.reset();
         previewDoc_.reset();
@@ -93,9 +95,9 @@ protected:
 
     AudioDataPtr src_; // snapshot of the full document when opened
     // Document's root note, refreshed on every draw() -- for modules that
-    // depend on the sample's nominal pitch (Freeze in exact-cycle mode, same
-    // as Infinity's Freeze Looper "MIDI Note Number"). Doesn't travel
-    // through open() because it can change while the window is open.
+    // depend on the sample's nominal pitch (Freeze in exact-cycle mode).
+    // Doesn't travel through open() because it can change while the window
+    // is open.
     int docRootNote_ = 60;
     // Document's tuning (cents), refreshed alongside docRootNote_. The
     // recorded CONTENT's actual tuning, relative to the root note, is the
@@ -107,6 +109,11 @@ protected:
     int64_t ls_ = 0, le_ = 0;
     bool open_ = false;
     bool dirty_ = false;
+    // "Monitoring volume" (dB): boosts only what's heard and
+    // the oscilloscope while the window is open (Engine::setMonitorGain), to
+    // loop quiet parts of a sample; never applied to the sample. Back to
+    // 0 dB every time the module is opened.
+    float monitorDb_ = 0.f;
     std::shared_ptr<AudioData> preview_;
     std::shared_ptr<AudioData> previewDoc_;
     void rebuildPreviewDoc();

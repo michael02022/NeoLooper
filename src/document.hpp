@@ -16,6 +16,7 @@
 #include "envelope.hpp"
 #include "procmods/amplitude_dsp.hpp"
 #include "procmods/filter_dsp.hpp"
+#include "procmods/autotune_dsp.hpp"
 #include "shared.hpp"
 
 class Document {
@@ -103,6 +104,15 @@ public:
     // or to the whole sample if there's no selection -- same criterion,
     // and same in-place/no-marker-remap behavior, as applyFilter.
     void applyAmplitude(const amplitudedsp::AmplitudeSpec& spec);
+    // Pitch-corrects (Snaptune, see procmods/autotune_dsp.hpp) the
+    // selection, or the whole sample if there's no selection -- same
+    // criterion and same in-place/no-marker-remap behavior as applyFilter
+    // (the correction never changes the duration).
+    // 'precomputed' (optional): the tool's own render of exactly this
+    // document snapshot and range, reused instead of correcting again
+    // (ignored if its size doesn't match the range).
+    void applyAutotune(const autotunedsp::Spec& spec,
+                       const std::vector<std::vector<float>>* precomputed = nullptr);
     // Transposes (see procmods/pitch_method.hpp) the selection, or the
     // whole sample if there's no selection (same criterion as applyFilter/
     // reverse/normalize). 'render' is called with the document's CURRENT
@@ -124,6 +134,12 @@ public:
     // is invalid, or render() fails.
     using PitchRenderFn = std::function<std::vector<std::vector<float>>(const AudioData&, int64_t, int64_t)>;
     void applyPitch(const PitchRenderFn& render, const char* methodName, bool resetTune);
+    // Same-length processing of the selection (or the whole sample) through
+    // 'render' -- applyPitch without the tune reset; used by processors with
+    // no entry point of their own (Exciter). opName is the undo entry/toast.
+    void applyProcess(const PitchRenderFn& render, const char* opName) {
+        applyPitch(render, opName, false);
+    }
     // Changes duration (see procmods/stretch_method.hpp) of the selection,
     // or the whole sample if there's no selection, WITHOUT changing pitch
     // -- the mirror image of applyPitch's traditional mode. 'render' is
@@ -141,6 +157,7 @@ public:
     using StretchRenderFn = std::function<std::vector<std::vector<float>>(const AudioData&, int64_t, int64_t)>;
     void applyStretch(const StretchRenderFn& render, const char* methodName);
     void toMono(int mode); // 0 = L channel, 1 = R channel, 2 = L+R mix
+    void toStereo(); // mono only: duplicates the channel into R
     void changeSampleRate(double sr, bool resample);
     // "Bakes" the current tune (cents) into the declared sample rate:
     // multiplies sampleRate by 2^(tuneCents/1200) WITHOUT resampling the
@@ -154,6 +171,11 @@ public:
     void clearAll();          // Delete with no selection: empty the editor (undoable)
     void trimAfterLoopEnd();    // deletes all audio after loop end
     void trimBeforeLoopStart(); // deletes all audio before loop start (remove the attack)
+    // Crops the document to the selection: everything outside it is deleted.
+    // The loop shifts with the audio and is clipped to what remains
+    // (removed if it falls entirely outside). Undoable. No-op without a
+    // selection or if the selection already is the whole sample.
+    void trimToSelection();
     // Duplicates the marked loop region [loopStart,loopEnd) and inserts the
     // copy right after it, extending loopEnd to the end of the new copy
     // (loopStart stays put): a one-cycle loop becomes a two-cycle loop of

@@ -4,7 +4,9 @@
 #include <cmath>
 #include <random>
 
+#include "alt_loopers_dsp.hpp" // bestShift
 #include "crossfade_inside_core.hpp"
+#include "loop_module.hpp"     // xfadeGains
 
 namespace rotationdsp {
 
@@ -20,8 +22,8 @@ namespace {
 
 // offsets[0]==0 (reference layer, at the original phase, see
 // build_rotation_layers in rotation_loop.py); offsets[1..nLayers-1] random
-// in [0, loopLen). seed<0 -> fresh OS entropy on every call (equivalent to
-// np.random.default_rng(None) in the script); seed>=0 -> reproducible. The
+// in [0, loopLen). seed<0 -> fresh OS entropy on every call; seed>=0 ->
+// reproducible. The
 // same offsets are used across all channels (a layer is "the same rotation"
 // in L and R, so as not to decorrelate the original material's stereo
 // image).
@@ -36,7 +38,8 @@ std::vector<int64_t> layerOffsets(int64_t loopLen, int nLayers, int64_t seed) {
 } // namespace
 
 bool buildRotationLoop(const AudioData& src, int64_t ls, int64_t le, int nLayers, int64_t seed,
-                       float xfadeMs, float xfadeCurve, float ccPct, float ccShape, Result& out) {
+                       float xfadeMs, float xfadeCurve, float ccPct, float ccShape, Result& out,
+                       bool alignPerChannel) {
     if (le <= ls || nLayers < 2 || nLayers > 100) return false;
     const int64_t loopLen = le - ls;
 
@@ -46,73 +49,80 @@ bool buildRotationLoop(const AudioData& src, int64_t ls, int64_t le, int nLayers
     out.xfadeN = xfadeN;
     out.nLoopSamples = nLoopSamples;
     out.ccAvail = ccAvail;
-    out.offsets = layerOffsets(loopLen, nLayers, seed);
-    out.safetyNormalized = false;
-
-    // equal-power: see compute_layer_gains(falloff_db=None) in the script --
-    // each layer is the same period at a different phase, so for loudness
-    // purposes they behave as decorrelated sources: n copies at 1/sqrt(n)
-    // sum to ~the same RMS as one copy at unity gain, regardless of
-    // nLayers.
-    const double gain = 1.0 / std::sqrt((double)nLayers);
+    // The loop that gets rotated: the region minus the head Classic
+    // Crossfade (Inside) excludes.
+    const int64_t m = loopLen - ccAvail;
+    out.offsets = layerOffsets(m, nLayers, seed);
 
     const int nch = src.channels();
-    out.ch.resize((size_t)nch);
+    std::vector<std::vector<double>> combined((size_t)nch), reference((size_t)nch);
     for (int c = 0; c < nch; ++c) {
         const auto& x = src.ch[c];
 
-        std::vector<double> loopBuffer((size_t)loopLen);
-        double referencePeak = 0.0;
-        for (int64_t i = 0; i < loopLen; ++i) {
-            const double v = (double)x[(size_t)(ls + i)];
-            loopBuffer[(size_t)i] = v;
-            referencePeak = std::max(referencePeak, std::fabs(v));
-        }
+        // 1. Seamless loop: [ls+ccAvail, le) with its tail blended toward
+        // the head [ls, ls+ccAvail) (Classic Crossfade Inside).
+        std::vector<float> head(x.begin() + ls, x.begin() + ls + ccAvail);
+        std::vector<float> tail(x.begin() + le - ccAvail, x.begin() + le);
+        const std::vector<float> blendedTail = ccinside::blendTail(head, tail, ccShape);
+        std::vector<double> loop((size_t)m);
+        for (int64_t i = 0; i < m - ccAvail; ++i) loop[(size_t)i] = x[(size_t)(ls + ccAvail + i)];
+        for (int64_t i = 0; i < ccAvail; ++i) loop[(size_t)(m - ccAvail + i)] = blendedTail[(size_t)i];
 
-        std::vector<double> combined((size_t)loopLen, 0.0);
-        for (int l = 0; l < nLayers; ++l) {
-            const int64_t o = out.offsets[(size_t)l];
-            for (int64_t i = 0; i < loopLen; ++i)
-                combined[(size_t)i] += gain * loopBuffer[(size_t)((i + o) % loopLen)];
+        // 2. Layers summed without DC, scaled to the loop's own energy, DC
+        // added back (see the .hpp).
+        double dc = 0.0;
+        for (double v : loop) dc += v;
+        dc /= (double)m;
+        double eLoop = 0.0;
+        for (auto& v : loop) {
+            v -= dc;
+            eLoop += v * v;
         }
-        // Safety normalization ONLY if the combined peak exceeds the
-        // original peak: never amplifies, only prevents clipping when the
-        // random offsets happen to align several layers in phase (see
-        // combine_layers in the script).
-        double peak = 0.0;
-        for (double v : combined) peak = std::max(peak, std::fabs(v));
-        if (peak > referencePeak && peak > 0.0) {
-            const double s = referencePeak / peak;
-            for (double& v : combined) v *= s;
-            out.safetyNormalized = true;
-        }
+        auto& sum = combined[(size_t)c];
+        sum.assign((size_t)m, 0.0);
+        for (int64_t o : out.offsets)
+            for (int64_t i = 0; i < m; ++i) sum[(size_t)i] += loop[(size_t)((i + o) % m)];
+        double eSum = 0.0;
+        for (double v : sum) eSum += v * v;
+        const double g = eSum > 1e-30 ? std::sqrt(eLoop / eSum) : 0.0;
+        for (double& v : sum) v = v * g + dc;
 
-        // Splice with the real attack: same technique as Harmonic (rotation
-        // via circular correlation + blend), reusing specloop instead of
-        // reimplementing it -- see spectral_loop_core.hpp.
-        std::vector<double> reference((size_t)xfadeN);
+        reference[(size_t)c].resize((size_t)xfadeN);
         for (int64_t i = 0; i < xfadeN; ++i)
-            reference[(size_t)i] = (double)x[(size_t)(ls - xfadeN + i)];
-        const int64_t shift =
-            (xfadeN > 0) ? specloop::circularBestShift(combined, reference) : 0;
+            reference[(size_t)c][(size_t)i] = (double)x[(size_t)(ls - xfadeN + i)];
+    }
 
-        specloop::RotatedBlend blend;
-        specloop::rotateAndBlend(combined, reference, shift, xfadeN, xfadeCurve, blend);
+    // 3. Attack alignment: one rotation for every channel, or one each.
+    std::vector<int64_t> shift((size_t)nch, 0);
+    if (xfadeN > 0) {
+        if (alignPerChannel)
+            for (int c = 0; c < nch; ++c)
+                shift[(size_t)c] = altloop::bestShift({combined[(size_t)c]}, {reference[(size_t)c]});
+        else
+            std::fill(shift.begin(), shift.end(), altloop::bestShift(combined, reference));
+    }
 
-        // Last step: Classic Crossfade (Inside), reused as-is over the
-        // loopRegion already spliced with the attack -- blends its own tail
-        // into its own head; the head then gets excluded from the loop
-        // (added to the attack, right after attackTail) same as
-        // ClassicCrossfadeInside does over the document's marked loop.
-        std::vector<float> ccHead(blend.loopRegion.begin(), blend.loopRegion.begin() + ccAvail);
-        std::vector<float> ccTail(blend.loopRegion.end() - ccAvail, blend.loopRegion.end());
-        std::vector<float> blendedTail = ccinside::blendTail(ccHead, ccTail, ccShape);
-
+    out.peak = 0.f;
+    out.ch.resize((size_t)nch);
+    for (int c = 0; c < nch; ++c) {
+        const auto& sum = combined[(size_t)c];
+        const auto& ref = reference[(size_t)c];
+        auto lb = [&](int64_t i) { return (float)sum[(size_t)((i + shift[(size_t)c]) % m)]; };
         Result::Channel rc;
-        rc.attackTail = std::move(blend.attackTail);
-        rc.loopBlended.assign(blend.loopRegion.begin() + ccAvail, blend.loopRegion.end() - ccAvail);
-        rc.loopBlended.insert(rc.loopBlended.end(), blendedTail.begin(), blendedTail.end());
-        rc.ccHead = std::move(ccHead);
+        rc.attackTail.resize((size_t)xfadeN);
+        for (int64_t j = 0; j < xfadeN; ++j) {
+            const float t = (xfadeN > 1) ? (float)j / (float)(xfadeN - 1) : 0.f;
+            float gIn, gOut;
+            xfadeGains(t, xfadeCurve, gIn, gOut);
+            rc.attackTail[(size_t)j] = (float)ref[(size_t)j] * gOut + lb(j) * gIn;
+        }
+        rc.ccHead.resize((size_t)ccAvail);
+        for (int64_t j = 0; j < ccAvail; ++j) rc.ccHead[(size_t)j] = lb(xfadeN + j);
+        rc.loopBlended.resize((size_t)m);
+        for (int64_t i = 0; i < m; ++i) {
+            rc.loopBlended[(size_t)i] = lb(xfadeN + ccAvail + i);
+            out.peak = std::max(out.peak, std::fabs(rc.loopBlended[(size_t)i]));
+        }
         out.ch[(size_t)c] = std::move(rc);
     }
 

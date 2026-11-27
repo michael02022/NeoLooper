@@ -11,6 +11,7 @@
 #include "../src/fft.hpp"
 #include "../src/flac_io.hpp"
 #include "../src/foreign_metadata.hpp"
+#include "../src/key_envelope.hpp"
 #include "../src/ogg_io.hpp"
 #include "../src/loopmods/auto_loop_finder.hpp"
 #include "../src/loopmods/crossfade_inside_core.hpp"
@@ -23,6 +24,8 @@
 #include "../src/loopmods/rotation_loop_dsp.hpp"
 #include "../src/loopmods/semicycle_loop_finder.hpp"
 #include "../src/procmods/amplitude_dsp.hpp"
+#include "../src/procmods/autotune_dsp.hpp"
+#include "../src/procmods/exciter_dsp.hpp"
 #include "../src/procmods/filter_dsp.hpp"
 #include "../src/procmods/loris_dsp.hpp"
 #include "../src/procmods/pitch_dsp.hpp"
@@ -279,8 +282,8 @@ int main(int argc, char** argv) {
               "Polarity: Invert (R) con seleccion solo toca ese tramo del canal derecho");
     }
 
-    // Filtro (filterdsp): high-pass resonante en cascada + banda bell
-    // (peaking EQ con ganancia +/-) en el DOMINIO DEL TIEMPO (biquads),
+    // Filtro (filterdsp): high-pass resonante en cascada + high-shelf
+    // (ganancia +/- por encima de su frecuencia) en el DOMINIO DEL TIEMPO (biquads),
     // reemplaza al Ecualizador anterior por STFT -- mucho mas simple de
     // verificar: sin bandas activas es identidad; un high-pass atenua un
     // tono grave pero deja pasar uno agudo; la banda realza o corta solo
@@ -367,23 +370,22 @@ int main(int argc, char** argv) {
                   "no multiplica el pico)");
         }
 
-        // banda bell +12dB @5kHz: realza un tono de esa frecuencia (~x4 en
+        // high-shelf +12dB @2kHz: realza un tono muy por encima (~x4 en
         // lineal) y deja practicamente intacto uno grave -- el caso de uso
         // real: dar brillo a los agudos sin tocar el resto.
         {
             filterdsp::FilterSpec spec;
             spec.bandOn = true;
-            spec.bandFreq = 5000.f;
+            spec.bandFreq = 2000.f;
             spec.bandGainDb = 12.f;
-            spec.bandQ = 1.f;
 
-            auto tone = makeTone(5000.0);
+            auto tone = makeTone(12000.0);
             auto out = filterdsp::apply(*tone, 0, n, spec);
             CHECK(!out.empty(), "Filtro: band apply no falla (realce)");
             if (!out.empty()) {
                 const double ratio = rmsOf(out[0], skip) / rmsOf(tone->ch[0], skip);
                 CHECK(ratio > 3.5 && ratio < 4.5,
-                      "Filtro: band de +12 dB @5kHz realza ~x4 un tono de 5 kHz");
+                      "Filtro: high-shelf de +12 dB @2kHz realza ~x4 un tono de 12 kHz");
             }
 
             auto toneLow = makeTone(100.0);
@@ -391,24 +393,23 @@ int main(int argc, char** argv) {
             CHECK(!outLow.empty(), "Filtro: band apply no falla (tono lejano)");
             if (!outLow.empty())
                 CHECK(rmsOf(outLow[0], skip) < rmsOf(toneLow->ch[0], skip) * 1.1,
-                      "Filtro: band @5kHz no realza un tono de 100 Hz");
+                      "Filtro: high-shelf @2kHz no realza un tono de 100 Hz");
         }
 
-        // banda bell -40dB @1kHz: cortando tambien funciona (mismo nucleo
-        // peaking que los notches que reemplaza)
+        // high-shelf -24dB @1kHz: cortando tambien funciona (todo lo de
+        // encima baja, ~x0.063)
         {
             filterdsp::FilterSpec spec;
             spec.bandOn = true;
             spec.bandFreq = 1000.f;
-            spec.bandGainDb = -40.f;
-            spec.bandQ = 4.f;
+            spec.bandGainDb = -24.f;
 
-            auto tone = makeTone(1000.0);
+            auto tone = makeTone(10000.0);
             auto out = filterdsp::apply(*tone, 0, n, spec);
             CHECK(!out.empty(), "Filtro: band apply no falla (corte)");
             if (!out.empty())
                 CHECK(rmsOf(out[0], skip) < rmsOf(tone->ch[0], skip) * 0.1,
-                      "Filtro: band de -40 dB centrada en 1 kHz atenua fuertemente un tono de 1 kHz");
+                      "Filtro: high-shelf de -24 dB @1kHz atenua fuertemente un tono de 10 kHz");
         }
 
         // rango invalido -> vacio con gracia (un biquad no exige un largo
@@ -458,12 +459,22 @@ int main(int argc, char** argv) {
             spec.bandOn = true;
             spec.bandFreq = 1000.f;
             spec.bandGainDb = 12.f;
-            spec.bandQ = 8.f;
-            const double center = filterdsp::responseAt(spec, 1000.0, sr);
-            CHECK(center > 3.5 && center < 4.5,
-                  "Filtro: responseAt de la band tiene su pico (+12 dB ~ x4) en la frecuencia central");
-            CHECK(filterdsp::responseAt(spec, 100.0, sr) < 1.1,
-                  "Filtro: responseAt de la band no afecta frecuencias lejanas");
+            const double mid = 20.0 * std::log10(filterdsp::responseAt(spec, 1000.0, sr));
+            CHECK(std::fabs(mid - 6.0) < 0.1,
+                  "Filtro: responseAt del high-shelf vale la mitad de la ganancia (+6 dB) en su frecuencia");
+            const double hi = 20.0 * std::log10(filterdsp::responseAt(spec, 15000.0, sr));
+            CHECK(std::fabs(hi - 12.0) < 0.3,
+                  "Filtro: responseAt del high-shelf llega a toda la ganancia (+12 dB) muy por encima");
+            CHECK(filterdsp::responseAt(spec, 100.0, sr) < 1.02,
+                  "Filtro: responseAt del high-shelf no afecta frecuencias muy por debajo");
+            bool monotonic = true;
+            double prev = 0.0;
+            for (double f = 20.0; f < 20000.0; f *= 1.05) {
+                double g = filterdsp::responseAt(spec, f, sr);
+                if (g < prev - 1e-9) monotonic = false;
+                prev = g;
+            }
+            CHECK(monotonic, "Filtro: high-shelf con Q 0.707 sube sin sobrepico (monotono)");
         }
 
         // analyzeStaticSpectrum: el pico de un tono de 1kHz aparece en el
@@ -1718,6 +1729,46 @@ int main(int argc, char** argv) {
     doc.undo();
     CHECK(doc.data()->channels() == 2, "deshacer vuelve a estereo");
 
+    // Sel->Trim: solo queda la seleccion, el loop se desplaza/recorta, deshacer
+    {
+        const auto before = doc.data();
+        const int64_t n = doc.frames();
+        doc.setLoopPoints(1000, 9000, false);
+        doc.setSelection(500, 6000);
+        doc.trimToSelection();
+        CHECK(doc.frames() == 5500 && doc.data()->ch[0][0] == before->ch[0][500] &&
+                  doc.data()->ch[0][5499] == before->ch[0][5999],
+              "Sel->Trim: queda exactamente la seleccion");
+        CHECK(doc.loopStart() == 500 && doc.loopEnd() == 5500,
+              "Sel->Trim: el loop se desplaza y se recorta al final de la seleccion");
+        CHECK(!doc.hasSelection(), "Sel->Trim: sin seleccion despues");
+        doc.undo();
+        CHECK(doc.frames() == n && doc.data()->ch[0] == before->ch[0] && doc.loopStart() == 1000 &&
+                  doc.loopEnd() == 9000 && doc.selStart() == 500 && doc.selEnd() == 6000,
+              "Sel->Trim: deshacer restaura audio, loop y seleccion");
+        doc.setSelection(9500, 12000);
+        doc.trimToSelection();
+        CHECK(!doc.hasLoop() && doc.frames() == 2500, "Sel->Trim: un loop fuera de la seleccion desaparece");
+        doc.undo();
+        doc.clearSelection();
+        doc.clearLoopPoints(false);
+    }
+
+    // mono -> estereo: duplica el canal en R, deshacer vuelve a mono
+    doc.toMono(0);
+    const std::vector<float> monoCh = doc.data()->ch[0];
+    const int64_t framesBefore = doc.frames();
+    doc.toStereo();
+    CHECK(doc.data()->channels() == 2 && doc.data()->ch[0] == monoCh &&
+              doc.data()->ch[1] == monoCh && doc.frames() == framesBefore,
+          "Stereo: duplica el canal mono en L y R sin cambiar la duracion");
+    doc.toStereo();
+    CHECK(doc.data()->channels() == 2, "Stereo: sobre un sample ya estereo no hace nada");
+    doc.undo();
+    CHECK(doc.data()->channels() == 1, "Stereo: deshacer vuelve a mono");
+    doc.undo();
+    CHECK(doc.data()->channels() == 2, "Stereo: deshacer el toMono deja el estereo original");
+
     // resampler HQ: seno 1 kHz 44100 -> 48000, error frente al analitico
     {
         std::vector<std::vector<float>> in(1);
@@ -1885,6 +1936,374 @@ int main(int argc, char** argv) {
               "motor RT: el ataque previo al loop start no se contamina con el loop");
         CHECK(maxErrLoop < 0.01f,
               "motor RT: el contenido del loop se reproduce correctamente tras el ataque");
+    }
+
+    // Autotune (Snaptune, modo Studio): un tono desafinado se lleva a la
+    // nota; Amount 0 no toca la afinacion; MIDI lleva a la root note; low
+    // notes afina una nota por debajo del rango del detector (65 Hz).
+    {
+        const double sr = 44100.0;
+        // tono con algunos armonicos (sierra suave), f constante
+        auto makeTone = [&](double f, double secs) {
+            auto d = std::make_shared<AudioData>();
+            d->sampleRate = sr;
+            d->format = SampleFormat::Float32;
+            d->ch.assign(1, std::vector<float>((size_t)(secs * sr)));
+            for (size_t i = 0; i < d->ch[0].size(); ++i) {
+                double ph = 2.0 * M_PI * f * (double)i / sr;
+                d->ch[0][i] = (float)(0.4 * std::sin(ph) + 0.2 * std::sin(2 * ph) + 0.1 * std::sin(3 * ph));
+            }
+            return d;
+        };
+        // frecuencia estimada por autocorrelacion (con interpolacion
+        // parabolica) en el tramo central
+        auto estimateHz = [&](const std::vector<float>& x, double fLo, double fHi) {
+            const size_t a = x.size() / 3, n = x.size() / 3;
+            const int lagMin = (int)(sr / fHi), lagMax = (int)(sr / fLo) + 2;
+            std::vector<double> r((size_t)lagMax + 2, 0.0);
+            for (int lag = lagMin - 1; lag <= lagMax + 1; ++lag) {
+                double acc = 0;
+                for (size_t i = a; i < a + n; ++i) acc += (double)x[i] * x[i + (size_t)lag];
+                r[(size_t)lag] = acc;
+            }
+            int best = lagMin;
+            for (int lag = lagMin; lag <= lagMax; ++lag)
+                if (r[(size_t)lag] > r[(size_t)best]) best = lag;
+            double y0 = r[(size_t)best - 1], y1 = r[(size_t)best], y2 = r[(size_t)best + 1];
+            double den = y0 - 2 * y1 + y2;
+            double frac = std::fabs(den) > 1e-12 ? 0.5 * (y0 - y2) / den : 0.0;
+            return sr / ((double)best + frac);
+        };
+        auto cents = [](double f, double ref) { return 1200.0 * std::log2(f / ref); };
+        const double a3 = 220.0;
+        auto tone = makeTone(a3 * std::pow(2.0, 35.0 / 1200.0), 2.0); // +35 cents
+        autotunedsp::Spec spec;
+        autotunedsp::Result res;
+        CHECK(autotunedsp::apply(*tone, 0, tone->frames(), spec, res) &&
+                  res.audio.size() == 1 && (int64_t)res.audio[0].size() == tone->frames(),
+              "Autotune: apply devuelve la region con el mismo largo");
+        double fIn = estimateHz(tone->ch[0], 150, 300), fOut = estimateHz(res.audio[0], 150, 300);
+        printf("   Autotune: entrada %+.1f cents -> salida %+.1f cents (A3)\n", cents(fIn, a3), cents(fOut, a3));
+        CHECK(std::fabs(cents(fOut, a3)) < 5.0, "Autotune: un tono a +35 cents se corrige a la nota (A3)");
+        bool voicedOk = false;
+        for (auto& p : res.curve)
+            if (p.voiced && p.targetNote == 57) { voicedOk = true; break; }
+        CHECK(!res.curve.empty() && voicedOk, "Autotune: la curva de pitch detecta la nota A3 (57)");
+
+        spec.amountPct = 0.f;
+        autotunedsp::apply(*tone, 0, tone->frames(), spec, res);
+        fOut = estimateHz(res.audio[0], 150, 300);
+        CHECK(std::fabs(cents(fOut, a3) - 35.0) < 5.0, "Autotune: Amount 0 deja la afinacion original");
+
+        // MIDI: target = root note C4 (60) aunque el tono este cerca de B3
+        spec = autotunedsp::Spec{};
+        spec.useMidi = true;
+        spec.rootNote = 60;
+        auto nearB = makeTone(261.6256 * std::pow(2.0, -70.0 / 1200.0), 2.0); // C4 - 70 cents
+        autotunedsp::apply(*nearB, 0, nearB->frames(), spec, res);
+        fOut = estimateHz(res.audio[0], 200, 330);
+        printf("   Autotune MIDI: salida %+.1f cents respecto a C4\n", cents(fOut, 261.6256));
+        CHECK(std::fabs(cents(fOut, 261.6256)) < 6.0,
+              "Autotune MIDI: el tono va a la root note (C4) aunque B3 este mas cerca");
+
+        // low notes: E1 (~41.2 Hz) + 30 cents, bajo el rango de 65 Hz del
+        // detector (una octava arriba, 82 Hz, ya entra)
+        const double b0 = 41.2034;
+        auto low = makeTone(b0 * std::pow(2.0, 30.0 / 1200.0), 3.0);
+        spec = autotunedsp::Spec{};
+        autotunedsp::apply(*low, 0, low->frames(), spec, res);
+        double fPlain = estimateHz(res.audio[0], 33, 55);
+        spec.lowNotes = true;
+        autotunedsp::apply(*low, 0, low->frames(), spec, res);
+        double fLow = estimateHz(res.audio[0], 33, 55);
+        printf("   Autotune low: sin low notes %+.1f cents, con low notes %+.1f cents (E1)\n",
+               cents(fPlain, b0), cents(fLow, b0));
+        CHECK(std::fabs(cents(fLow, b0)) < 6.0,
+              "Autotune low notes: una nota por debajo de 65 Hz (E1) se corrige");
+
+        // Document::applyAutotune: misma duracion, corrige, se deshace; y con
+        // un render precalculado usa ese en vez de recalcular
+        {
+            SharedParams aparams;
+            AudioDataPtr apub;
+            Document adoc(aparams, [&](AudioDataPtr d) { apub = std::move(d); });
+            adoc.setAudio(tone, "Autotune doc: setup");
+            const int64_t n0 = adoc.frames();
+            adoc.applyAutotune(autotunedsp::Spec{});
+            CHECK(adoc.frames() == n0 &&
+                      std::fabs(cents(estimateHz(adoc.data()->ch[0], 150, 300), a3)) < 5.0,
+                  "Autotune (documento): aplica la correccion sin cambiar la duracion");
+            adoc.undo();
+            CHECK(adoc.data()->ch[0] == tone->ch[0], "Autotune (documento): deshacer devuelve el original");
+            std::vector<std::vector<float>> fake(1, std::vector<float>((size_t)n0, 0.25f));
+            adoc.applyAutotune(autotunedsp::Spec{}, &fake);
+            CHECK(adoc.data()->ch[0][(size_t)(n0 / 2)] == 0.25f,
+                  "Autotune (documento): usa el render precalculado de la ventana");
+        }
+    }
+
+    // Exciter (M/S Exciter, con nivel igualado)
+    {
+        const double sr = 44100.0;
+        auto makeTones = [&](std::initializer_list<std::pair<double, double>> parts, int nch) {
+            auto d = std::make_shared<AudioData>();
+            d->sampleRate = sr;
+            d->format = SampleFormat::Float32;
+            d->ch.assign((size_t)nch, std::vector<float>(44100));
+            for (int c = 0; c < nch; ++c)
+                for (size_t i = 0; i < 44100; ++i) {
+                    double v = 0;
+                    for (auto& [f, a] : parts) v += a * std::sin(2 * M_PI * f * (double)i / sr + c * 0.7);
+                    d->ch[(size_t)c][i] = (float)v;
+                }
+            return d;
+        };
+        // energia de una frecuencia (DFT de un bin) en el tramo central
+        auto bin = [&](const std::vector<float>& x, double f) {
+            double re = 0, im = 0;
+            for (size_t i = 11025; i < 33075; ++i) {
+                re += x[i] * std::cos(2 * M_PI * f * (double)i / sr);
+                im += x[i] * std::sin(2 * M_PI * f * (double)i / sr);
+            }
+            return std::sqrt(re * re + im * im) / 11025.0;
+        };
+        auto tone = makeTones({{220.0, 0.4}, {3000.0, 0.2}}, 1);
+        CHECK(exciterdsp::clampHz(5.0, 44100.0) == 20.0 && exciterdsp::clampHz(30000.0, 44100.0) == 19845.0 &&
+                  exciterdsp::clampHz(2000.0, 8000.0) == 2000.0 && exciterdsp::clampHz(5000.0, 8000.0) == 3600.0,
+              "Exciter: el High-pass va de 20 Hz a 45% del rate (8 kHz -> hasta 3600 Hz)");
+
+        exciterdsp::MSSpec ms;
+        ms.excMixPct = 0.f;
+        auto st = makeTones({{220.0, 0.4}, {3000.0, 0.2}}, 2);
+        auto o2 = exciterdsp::applyMS(*st, 0, st->frames(), ms);
+        float maxDiff = 0;
+        for (int c = 0; c < 2; ++c)
+            for (size_t i = 0; i < o2[(size_t)c].size(); ++i)
+                maxDiff = std::max(maxDiff, std::fabs(o2[(size_t)c][i] - st->ch[(size_t)c][i]));
+        CHECK(maxDiff < 1e-5f, "Exciter MS: Exciter Mix 0 y Width 1 dejan el audio intacto");
+        ms.width = 0.f;
+        o2 = exciterdsp::applyMS(*st, 0, st->frames(), ms);
+        maxDiff = 0;
+        for (size_t i = 0; i < o2[0].size(); ++i) maxDiff = std::max(maxDiff, std::fabs(o2[0][i] - o2[1][i]));
+        CHECK(maxDiff < 1e-6f, "Exciter MS: Width 0 deja L = R (mono)");
+        ms = exciterdsp::MSSpec{};
+        ms.drive = 10.f;
+        ms.excMixPct = 50.f;
+        auto o1 = exciterdsp::applyMS(*tone, 0, tone->frames(), ms);
+        double h = bin(o1[0], 9000.0), hDry = bin(tone->ch[0], 9000.0);
+        printf("   MS Exciter: 3er armonico de 3 kHz %.5f -> %.5f\n", hDry, h);
+        CHECK(o1.size() == 1 && h > hDry + 1e-3, "Exciter MS: genera armonicos (3er de 3 kHz) y mono sigue mono");
+        {
+            // High-pass ajustable: un tono de 500 Hz solo se excita si el HP baja de 2 kHz
+            auto t500 = makeTones({{500.0, 0.4}}, 1);
+            exciterdsp::MSSpec m2;
+            m2.drive = 10.f;
+            auto oa = exciterdsp::applyMS(*t500, 0, t500->frames(), m2);
+            m2.hpHz = 200.f;
+            auto ob = exciterdsp::applyMS(*t500, 0, t500->frames(), m2);
+            double h2000 = bin(oa[0], 1500.0), h200 = bin(ob[0], 1500.0);
+            printf("   MS Exciter 500 Hz: 3er armonico con HP 2 kHz %.5f, con HP 200 Hz %.5f\n", h2000, h200);
+            CHECK(h200 > 5.0 * h2000, "Exciter MS: el High-pass ajustable permite excitar frecuencias bajas");
+        }
+        // seleccion: fuera de la region no cambia nada y no hay NaN
+        o1 = exciterdsp::applyMS(*tone, 10000, 20000, ms);
+        bool finite = o1.size() == 1 && o1[0].size() == 10000;
+        for (float v : o1[0]) finite &= std::isfinite(v);
+        CHECK(finite, "Exciter MS: procesa solo la region pedida");
+        {
+            // volumen: con los valores por defecto, con Input Gain alto y con
+            // mucho Drive, el RMS de salida es el de entrada; los graves no
+            // bajan (antes el crossfade de Exciter Mix los dejaba a -6 dB)
+            auto rmsDb = [](const std::vector<std::vector<float>>& ch) {
+                double e = 0; size_t n = 0;
+                for (auto& v : ch) for (float x : v) { e += (double)x * x; ++n; }
+                return 10.0 * std::log10(e / (double)n);
+            };
+            auto stv = makeTones({{220.0, 0.4}, {3000.0, 0.15}}, 2);
+            const double inDb = rmsDb(stv->ch);
+            exciterdsp::MSSpec mv;
+            auto ov = exciterdsp::applyMS(*stv, 0, stv->frames(), mv);
+            const double d0 = rmsDb(ov) - inDb;
+            const double lowDb = 20.0 * std::log10(bin(ov[0], 220.0) / bin(stv->ch[0], 220.0));
+            mv.drive = 15.f;
+            mv.excMixPct = 100.f;
+            mv.width = 2.f;
+            ov = exciterdsp::applyMS(*stv, 0, stv->frames(), mv);
+            const double d1 = rmsDb(ov) - inDb;
+            printf("   Exciter nivel: defecto %+.2f dB (220 Hz %+.2f dB), extremo %+.2f dB\n", d0, lowDb, d1);
+            CHECK(std::fabs(d0) < 0.05 && std::fabs(d1) < 0.05,
+                  "Exciter: aplicar el efecto no cambia el volumen (RMS igual), ni con ajustes extremos");
+            CHECK(lowDb > -1.0, "Exciter: los graves no pierden nivel con Exciter Mix por defecto");
+        }
+    }
+
+    // envolvente de preview del piano: plantillas (key_envelope.hpp)
+    {
+        using keyenv::Curve;
+        auto dbAt = [](Curve c, double t, double hold, double dec) {
+            bool done = false;
+            float g = keyenv::gain(c, t, hold, dec, done);
+            return 20.0 * std::log10(std::max(1e-12, (double)g));
+        };
+        bool done = false;
+        CHECK(keyenv::gain(Curve::Linear, 0.25, 0.5, 1.0, done) == 1.f && !done,
+              "KeyEnv: nivel completo durante el hold");
+        CHECK(std::fabs(keyenv::gain(Curve::Linear, 1.0, 0.5, 1.0, done) - 0.5f) < 1e-6f,
+              "KeyEnv Linear: mitad de amplitud a mitad del decay");
+        keyenv::gain(Curve::Linear, 1.5, 0.5, 1.0, done);
+        CHECK(done, "KeyEnv Linear: termina al acabar el decay");
+        CHECK(std::fabs(dbAt(Curve::Sf2, 0.5, 0.0, 1.0) + 48.0) < 0.01,
+              "KeyEnv SF2: lineal en dB (-48 dB a mitad, -96 al final)");
+        CHECK(std::fabs(dbAt(Curve::SfzDecay, 0.5, 0.0, 1.0) - 20.0 * std::log10(std::exp(-4.5))) < 0.01,
+              "KeyEnv SFZ decay: exponencial exp(-9 t/T)");
+        const double tCutD = std::log(1000.0) / 9.0, tCutR = std::log(1e4) / 9.0;
+        CHECK(std::fabs(dbAt(Curve::SfzDecay, tCutD + 0.025, 0.0, 1.0) - 20.0 * std::log10(0.0005)) < 0.05,
+              "KeyEnv SFZ decay: corte en -60 dB con fade lineal de 50 ms");
+        CHECK(std::fabs(dbAt(Curve::SfzRelease, tCutD + 0.025, 0.0, 1.0) -
+                        20.0 * std::log10(std::exp(-9.0 * (tCutD + 0.025)))) < 0.01,
+              "KeyEnv SFZ release: sigue exponencial por debajo de -60 dB");
+        keyenv::gain(Curve::SfzRelease, tCutR + 0.051, 0.0, 1.0, done);
+        CHECK(done, "KeyEnv SFZ release: termina tras -80 dB + 50 ms");
+        // monotona decreciente en todas las plantillas
+        bool mono = true;
+        for (int c = 0; c < keyenv::kCurveCount; ++c) {
+            float prev = 2.f;
+            for (double t = 0; t < 2.0; t += 1e-3) {
+                float g = keyenv::gain((Curve)c, t, 0.1, 0.8, done);
+                if (g > prev + 1e-7f || g < 0.f) mono = false;
+                prev = g;
+            }
+        }
+        CHECK(mono, "KeyEnv: todas las plantillas decrecen sin subir ni bajar de 0");
+    }
+
+    // motor RT: la envolvente del piano solo afecta a notas del piano y para
+    // la reproduccion al llegar al silencio
+    {
+        Engine engine;
+        engine.activate(48000.0);
+        auto ad = std::make_shared<AudioData>();
+        ad->sampleRate = 48000.0;
+        ad->format = SampleFormat::Float32;
+        ad->ch.assign(1, std::vector<float>(48000, 0.5f));
+        ad->buildPeaks();
+        engine.publishDocument(ad);
+        engine.params.rootNote.store(60);
+        engine.params.loopStart.store(0);
+        engine.params.loopEnd.store(48000);
+        engine.params.loopEnabled.store(true);
+        engine.params.keyEnvEnabled.store(true);
+        engine.params.keyEnvCurve.store((int)keyenv::Curve::Linear);
+        engine.params.keyEnvHoldMs.store(10.f);
+        engine.params.keyEnvDecayMs.store(100.f);
+        const uint32_t block = 48;
+        float outL[block], outR[block];
+        auto run = [&](int blocks, std::vector<float>& rec) {
+            for (int b = 0; b < blocks; ++b) {
+                for (uint32_t i = 0; i < block; ++i) outL[i] = outR[i] = 0.f;
+                engine.process(nullptr, nullptr, outL, outR, block);
+                rec.insert(rec.end(), outL, outL + block);
+            }
+        };
+        std::vector<float> rec;
+        engine.playFromNote(60);
+        run(200, rec); // 200 ms
+        // ~9 ms: hold (rampa anti-click casi asentada); 60 ms: 10 ms hold + 50 ms de 100 -> 0.5
+        CHECK(std::fabs(rec[440] - 0.5f) < 0.03f, "Motor KeyEnv: nivel completo en el hold");
+        CHECK(std::fabs(rec[48 * 60] - 0.25f) < 0.01f, "Motor KeyEnv: decay lineal a mitad");
+        CHECK(!engine.isPlaying(), "Motor KeyEnv: al llegar a 0 se detiene la reproduccion");
+        // Play (no piano) ignora la envolvente
+        rec.clear();
+        engine.seek(0.0);
+        engine.play();
+        run(200, rec);
+        CHECK(engine.isPlaying() && std::fabs(rec.back() - 0.5f) < 1e-3f,
+              "Motor KeyEnv: Play normal no usa la envolvente");
+        // deshabilitada: el piano suena normal
+        engine.params.keyEnvEnabled.store(false);
+        rec.clear();
+        engine.playFromNote(60);
+        run(200, rec);
+        CHECK(engine.isPlaying() && std::fabs(rec.back() - 0.5f) < 1e-3f,
+              "Motor KeyEnv: deshabilitada, el piano suena sin envolvente");
+    }
+
+    // motor RT: al arrancar desde el primer sample no hay rampa anti-click
+    // (el ataque suena tal cual, con su "pop"); al reanudar a mitad, si.
+    {
+        Engine engine;
+        engine.activate(44100.0);
+        auto ad = std::make_shared<AudioData>();
+        ad->sampleRate = 44100.0;
+        ad->format = SampleFormat::Float32;
+        ad->ch.assign(1, std::vector<float>(44100, 0.5f));
+        ad->buildPeaks();
+        engine.publishDocument(ad);
+        float outL[64], outR[64];
+        auto block = [&] {
+            for (int i = 0; i < 64; ++i) outL[i] = outR[i] = 0.f;
+            engine.process(nullptr, nullptr, outL, outR, 64);
+        };
+        engine.seek(0.0);
+        engine.play();
+        block();
+        CHECK(std::fabs(outL[0] - 0.5f) < 1e-4f,
+              "Motor: Play desde el primer sample suena al nivel completo desde la primera muestra (sin fade-in)");
+        engine.pause();
+        for (int k = 0; k < 20; ++k) block(); // termina el fade-out
+        engine.seek(10000.0);
+        engine.play();
+        block();
+        CHECK(outL[0] < 0.25f && outL[63] > outL[0],
+              "Motor: reanudar a mitad del sample mantiene la rampa anti-click");
+        engine.pause();
+        for (int k = 0; k < 20; ++k) block();
+        engine.playFromNote(60);
+        block();
+        CHECK(std::fabs(outL[0] - 0.5f) < 1e-4f, "Motor: una tecla del piano tampoco hace fade-in del ataque");
+    }
+
+    // motor RT: interpolacion de reproduccion (None / Linear / 16 Sinc)
+    {
+        // seno a fs/4 (0, 1, 0, -1...) a mitad de velocidad (doc 24 kHz, host
+        // 48 kHz): cada muestra del host cae en un entero o justo a mitad
+        auto runMode = [](PlaybackInterp mode, std::vector<float>& rec) {
+            Engine engine;
+            engine.activate(48000.0);
+            auto ad = std::make_shared<AudioData>();
+            ad->sampleRate = 24000.0;
+            ad->format = SampleFormat::Float32;
+            ad->ch.assign(1, std::vector<float>(4000));
+            for (int i = 0; i < 4000; ++i) ad->ch[0][(size_t)i] = (float)std::sin(M_PI * 0.5 * i);
+            ad->buildPeaks();
+            engine.publishDocument(ad);
+            engine.params.playbackInterp.store((int)mode);
+            engine.play();
+            float outL[64], outR[64];
+            for (int b = 0; b < 60; ++b) {
+                for (int i = 0; i < 64; ++i) outL[i] = outR[i] = 0.f;
+                engine.process(nullptr, nullptr, outL, outR, 64);
+                rec.insert(rec.end(), outL, outL + 64);
+            }
+        };
+        std::vector<float> rn, rl, rs, rc;
+        runMode(PlaybackInterp::None, rn);
+        runMode(PlaybackInterp::Linear, rl);
+        runMode(PlaybackInterp::Cubic, rc);
+        runMode(PlaybackInterp::Sinc16, rs);
+        // muestra del host 2000 (rampa asentada): pos = 1000 (valor 0) y
+        // 2001: pos = 1000.5, entre 0 y 1 -- el seno real vale sin(pi/4)
+        printf("   None %.3f %.3f | Linear %.3f %.3f | Sinc %.3f %.3f\n", rn[2000], rn[2001],
+               rl[2000], rl[2001], rs[2000], rs[2001]);
+        CHECK(std::fabs(rn[2001] - rn[2000]) < 1e-4f,
+              "Interp None: mantiene la muestra anterior entre muestras");
+        CHECK(std::fabs(rl[2001] - 0.5f) < 1e-3f,
+              "Interp Linear: a mitad entre 0 y 1 da 0.5");
+        // Catmull-Rom con -1, 0, 1, 0 a t=0.5: 0.5*(1 + 0.5 - 0.25) = 0.625
+        CHECK(std::fabs(rc[2001] - 0.625f) < 1e-3f && std::fabs(rc[2000]) < 1e-4f,
+              "Interp Cubic Spline: pasa por las muestras y da 0.625 a mitad (Catmull-Rom)");
+        CHECK(std::fabs(rs[2001] - (float)std::sqrt(0.5)) < 0.02f,
+              "Interp 16 Sinc: reconstruye el seno entre muestras (~0.707)");
     }
 
     // motor RT: Engine::publishPreview con loopOffset > 0 (usado por
@@ -2103,6 +2522,23 @@ int main(int argc, char** argv) {
         LoadResult wr = loadAudioFile(wpath);
         CHECK(wr.hasInstrument && wr.loopStart == 100 && wr.loopEnd == 40000,
               "WAV includeCue=false: loop sigue recuperandose via smpl");
+
+        // Extension que miente: el mismo WAV guardado como ".mp3" (p. ej. una
+        // descarga web) se tiene que abrir por su contenido (RIFF), no
+        // mandarse a dr_mp3 por la extension.
+        {
+            std::string mpath = tmpdir + "/neolooper_test_wav_as.mp3";
+            std::string raw = readWhole(wpath);
+            FILE* mf = fopen(mpath.c_str(), "wb");
+            if (mf) { fwrite(raw.data(), 1, raw.size(), mf); fclose(mf); }
+            LoadResult mr = loadAudioFile(mpath);
+            CHECK(mr.data && wr.data && mr.data->frames() == wr.data->frames() &&
+                      mr.data->ch[0] == wr.data->ch[0],
+                  "WAV con extension .mp3: se carga por contenido, identico al .wav");
+            CHECK(mr.hasInstrument && mr.loopStart == 100 && mr.loopEnd == 40000,
+                  "WAV con extension .mp3: conserva el loop del smpl");
+            std::remove(mpath.c_str());
+        }
 
         std::string fpath = tmpdir + "/neolooper_test_nocue.flac";
         CHECK(exportFlac(fpath, *doc.data(), 16, doc.loopStart(), doc.loopEnd(),
@@ -3020,7 +3456,7 @@ int main(int argc, char** argv) {
         CHECK(ok3 && res3.freezeStart == 0 && res3.xfadeN == 0,
               "Freeze: freezePos=0.0 (inicio del sample) da xfadeN=0 sin fallar");
 
-        // Modo "ciclo exacto" (Infinity): vocoder anclado a la serie
+        // Modo "ciclo exacto": vocoder anclado a la serie
         // armonica de la root note, periodo redondeado a muestras enteras,
         // cada ciclo BIT-identico. El mismo tono estereo (fundamental
         // 220 Hz, canales L/R identicos) usado arriba: MIDI 57 -> periodo

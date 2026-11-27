@@ -1,0 +1,9 @@
+standalone_features.h -- from clap-wrapper (https://github.com/free-audio/clap-wrapper),
+tag v0.18.0 (commit c3a2531a5e66572b4246fc64271e2103d0de37bb), include/clapwrapper/.
+MIT License, Copyright (c) 2022 defiantnerd (see clap-wrapper's LICENSE).
+
+The host extension the clap-wrapper standalone offers: NeoLooper uses it to
+open the standalone's Audio/MIDI settings window from its own File menu
+(src/plugin.cpp). Vendored (rather than taken from the fetched clap-wrapper)
+so the plugin's sources build the same with NEOLOOPER_BUILD_VST3/STANDALONE
+off. In any other host the extension is simply absent.

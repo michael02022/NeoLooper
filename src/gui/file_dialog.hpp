@@ -41,6 +41,10 @@ public:
     // Configure AFTER open(); cleared on the next open().
     void setInfoText(const char* text);
 
+    // Starts browsing in 'dir' (call AFTER open()); ignored if it isn't an
+    // existing directory.
+    void setDirectory(const std::string& dir);
+
     // Draws the dialog; returns true if the user accepted, leaving the
     // chosen path in result().
     bool draw();

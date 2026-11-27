@@ -84,7 +84,8 @@ void FilterTool::draw(Document& doc, Engine& eng) {
                     1000.0 * (double)L / src_->sampleRate,
                     (s0_ == 0 && s1_ == src_->frames()) ? " -- whole sample" : " -- selection");
         ImGui::TextWrapped(
-            "Resonant high-pass + bell band (boost or cut). The background is "
+            "Resonant high-pass + high-shelf (boosts or cuts everything above its "
+            "frequency). The background is "
             "a STATIC analysis of this region's real spectrum (not updated "
             "live); the bright line is the current filter's response.");
         if (ImGui::Checkbox("Preview", &previewOn_)) {
@@ -275,11 +276,11 @@ void FilterTool::draw(Document& doc, Engine& eng) {
                     "the rest only add slope.");
                 ImGui::PopID();
 
-                // --- Band (bell) ---
+                // --- High-shelf ---
                 ImGui::PushID("band");
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
-                ImGui::TextUnformatted("Band");
+                ImGui::TextUnformatted("High-Shelf");
                 ImGui::TableNextColumn();
                 specChanged |= ImGui::Checkbox("##on", &spec_.bandOn);
                 ImGui::TableNextColumn();
@@ -287,20 +288,31 @@ void FilterTool::draw(Document& doc, Engine& eng) {
                 specChanged |=
                     ImGui::SliderFloat("##freq", &spec_.bandFreq, 20.f, 20000.f, "%.0f Hz",
                                        ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
+                ImGui::SetItemTooltip(
+                    "Midpoint of the transition (half the gain): everything "
+                    "above it gets the full gain.");
                 ImGui::TableNextColumn();
                 ImGui::SetNextItemWidth(-1);
                 specChanged |= ImGui::SliderFloat("##gain", &spec_.bandGainDb, -24.f, 24.f,
                                                   "%+.1f dB", ImGuiSliderFlags_AlwaysClamp);
                 ImGui::SetItemTooltip(
-                    "Positive boosts (e.g. brightness in the highs), negative "
-                    "cuts. Middle-click to type the exact value.");
+                    "Gain above the frequency: positive boosts (e.g. brightness "
+                    "in the highs), negative cuts. Middle-click to type the "
+                    "exact value.");
                 ImGui::TableNextColumn();
                 ImGui::SetNextItemWidth(-1);
-                specChanged |= ImGui::SliderFloat("##q", &spec_.bandQ, 0.3f, 20.f, "%.2f",
-                                                  ImGuiSliderFlags_AlwaysClamp);
+                specChanged |= ImGui::SliderFloat("##q", &spec_.bandQ, 0.3f, 4.f, "%.2f",
+                                                  ImGuiSliderFlags_AlwaysClamp |
+                                                      ImGuiSliderFlags_Logarithmic);
+                if (ImGui::IsItemClicked(1)) { // right-click: reset
+                    spec_.bandQ = (float)filterdsp::kButterworthQ;
+                    specChanged = true;
+                }
                 ImGui::SetItemTooltip(
-                    "Bell width: lower Q = wider (more musical for adding "
-                    "brightness), higher Q = more surgical.");
+                    "Shape of the transition: 0.71 = the steepest without "
+                    "overshoot, lower = gentler and wider, higher = a dip "
+                    "before and a bump after the frequency. Right-click "
+                    "resets to 0.71.");
                 ImGui::PopID();
                 ImGui::EndTable();
             }
